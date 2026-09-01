@@ -1,0 +1,6 @@
+{
+    "formatVersion": 1,
+    "name": "Python 通信演示工程",
+    "database": "database/demo.sqlite",
+    "scripts": "scripts/examples"
+}

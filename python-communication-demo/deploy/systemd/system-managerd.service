@@ -1,0 +1,31 @@
+[Unit]
+Description=Third-party communication Python SystemManager
+After=local-fs.target
+
+[Service]
+Type=simple
+User=thirdcomm
+Group=thirdcomm
+EnvironmentFile=/etc/thirdcomm/python-demo.env
+ExecStart=/opt/thirdcomm/bin/system-managerd \
+  --database ${PYCOM_DATABASE} \
+  --scripts-root ${PYCOM_SCRIPTS_ROOT} \
+  --shm-name ${PYCOM_SHM_NAME} \
+  --log ${PYCOM_LOG} \
+  --python ${PYCOM_PYTHON} \
+  --tcp-host ${PYCOM_TCP_HOST} \
+  --tcp-port ${PYCOM_TCP_PORT}
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/thirdcomm /etc/thirdcomm
+ReadWritePaths=/run/thirdcomm /var/log/thirdcomm
+RuntimeDirectory=thirdcomm
+RuntimeDirectoryMode=0750
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
