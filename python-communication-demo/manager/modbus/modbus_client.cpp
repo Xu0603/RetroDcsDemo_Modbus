@@ -206,6 +206,39 @@ ModbusClient::readRegisters(
 }
 
 
+void ModbusClient::writeBit(int address, bool value) {
+    if (!connected_)
+        throw std::runtime_error("Modbus client is not connected");
+
+    if (modbus_write_bit(ctx_, address, value ? 1 : 0) == -1) {
+        setError(modbus_strerror(errno));
+        connected_ = false;
+        throw std::runtime_error("Modbus coil write failed: " + lastError_);
+    }
+}
+
+
+void ModbusClient::writeRegisters(
+    int address,
+    const std::vector<std::uint16_t> &registers
+) {
+    if (!connected_)
+        throw std::runtime_error("Modbus client is not connected");
+    if (registers.empty())
+        throw std::runtime_error("invalid Modbus register count");
+
+    const int count = static_cast<int>(registers.size());
+    const int result = count == 1
+        ? modbus_write_register(ctx_, address, registers.front())
+        : modbus_write_registers(ctx_, address, count, registers.data());
+    if (result != count) {
+        setError(modbus_strerror(errno));
+        connected_ = false;
+        throw std::runtime_error("Modbus register write failed: " + lastError_);
+    }
+}
+
+
 const std::string &
 ModbusClient::lastError() const {
 

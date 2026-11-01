@@ -23,6 +23,13 @@ Value decodeModbusRegisters(
     DataType dataType,
     ModbusByteOrder byteOrder);
 
+// Convert a system value to Modbus register words using the configured byte
+// order. This is the inverse operation of decodeModbusRegisters().
+std::vector<std::uint16_t> encodeModbusRegisters(
+    const Value &value,
+    DataType dataType,
+    ModbusByteOrder byteOrder);
+
 // 字符串转换为 ModbusByteOrder
 ModbusByteOrder parseModbusByteOrder(const std::string &text);
 

@@ -3,11 +3,14 @@
 #include "manager_client.h"
 #include "csv_utils.h"
 #include "project_metadata.h"
-#include "modbus_shared_memory_reader.h"
+#include "modbus_server_client.h"
 
 #include <QtWidgets>
 #include <QtNetwork>
 #include <QtSql>
+#include <QHash>
+#include <QComboBox>
+#include <QSqlError>
 
 #define RETRO_STRINGIFY_INNER(value) #value
 #define RETRO_STRINGIFY(value) RETRO_STRINGIFY_INNER(value)
@@ -57,18 +60,18 @@ private:
     QTabWidget *tabs_ = nullptr;
     QTableWidget *overview_ = nullptr;
     QTableWidget *frames_ = nullptr;
+    QHash<QString, QString> lastModbusFrameKeys_;
     QPlainTextEdit *frameDetail_ = nullptr;
     QPlainTextEdit *runtimeLog_ = nullptr;
     QTableWidget *problems_ = nullptr;
     QTabWidget *logTabs_ = nullptr;
     QTableWidget *onlineTable_ = nullptr;
+    QTableWidget *modbusPointsTable_ = nullptr;
     QTimer *modbusTimer_ = nullptr;
     QString currentCommunicationType_ =
     QStringLiteral("python");
 
-    bool modbusMode_ = false;
-    ModbusSharedMemoryReader modbusSharedMemoryReader_;
-    QTimer *modbusRefreshTimer_ = nullptr;
+    
     QLabel *clock_ = nullptr;
     QLabel *rxRate_ = nullptr;
     QLabel *serviceStatus_ = nullptr;
@@ -77,17 +80,58 @@ private:
     QLabel *pointSummary_ = nullptr;
     QLabel *currentProjectLabel_ = nullptr;
     QTreeWidget *projectTree_ = nullptr;
+
     QTreeWidgetItem *projectRootItem_ = nullptr;
+
+    QTreeWidgetItem *pythonCommunicationItem_ = nullptr;
     QTreeWidgetItem *pythonTasksItem_ = nullptr;
+
+    QTreeWidgetItem *modbusCommunicationItem_ = nullptr;
+    QTreeWidgetItem *modbusTasksItem_ = nullptr;
+    QTreeWidgetItem *modbusPointsItem_ = nullptr;
+
+    QLineEdit *modbusTaskNameEdit_ = nullptr;
+
+    QLineEdit *modbusTaskHostEdit_ = nullptr;
+    QLineEdit *modbusTaskPortEdit_ = nullptr;
+    QLineEdit *modbusTaskSlaveEdit_ = nullptr;
+
+    QLineEdit *modbusTaskPeriodEdit_ = nullptr;
+    QLineEdit *modbusTaskTimeoutEdit_ = nullptr;
+    QLineEdit *modbusTaskRetryEdit_ = nullptr;
+    QLineEdit *modbusTaskReconnectEdit_ = nullptr;
+
+    QLineEdit *modbusTaskProtocolEdit_ = nullptr;
+    QLineEdit *modbusTaskRoleEdit_ = nullptr;
+
+    QPushButton *saveModbusTaskButton_ = nullptr;
+
+    // 当前正在编辑/查看的 Modbus 采集任务
+    qlonglong currentModbusTaskId_ = -1;
     QTreeWidgetItem *pointDirectoryItem_ = nullptr;
     QAction *startManagerAction_ = nullptr;
     QAction *stopManagerAction_ = nullptr;
-    QProcess *managerProcess_ = nullptr;
+        QProcess *managerProcess_ = nullptr;
     int onlineTabIndex_ = -1;
+
+    // =========================================================
+    // ModbusCollector TCP Server
+    //
+    // ModbusCollector:
+    //     127.0.0.1:19091
+    //
+    // MainWindow 通过 ModbusServerClient
+    // 请求实时变量和 Modbus TX/RX 报文。
+    // =========================================================
+    ModbusServerClient modbusServerClient_;
+    quint32 modbusRequestId_ = 0;
+
     quint32 requestId_ = 0;
     QString currentProjectDirectory_;
     QString currentProjectName_;
     QString currentDatabase_;
+    QString modbusConfigDatabase_ =
+    QStringLiteral("/home/xu/桌面/ModbusCollector/modbus_config.db");
     QString currentScriptsRoot_;
     
     QString currentProjectMetadata_;
@@ -96,6 +140,7 @@ private:
     bool framePaused_ = false;
     qint64 runtimeLogOffset_ = 0;
     QString runtimeLogPending_;
+    
 
     void createMenus()
     {
@@ -147,8 +192,17 @@ private:
         auto *overviewAction = tb->addAction(pixelIcon(QColor("#000080"), 3), QStringLiteral("系统总览"));
         auto *onlineAction = tb->addAction(pixelIcon(QColor("#008080"), 3), QStringLiteral("在线数据"));
         auto *framesAction = tb->addAction(pixelIcon(QColor("#000080"), 3), QStringLiteral("报文监视"));
-        startManagerAction_->setToolTip(QStringLiteral("检测并启动 system-managerd"));
-        stopManagerAction_->setToolTip(QStringLiteral("停止由本上位启动的 system-managerd"));
+        startManagerAction_->setToolTip(
+    QStringLiteral(
+        "启动当前选中的通信通道检测"
+    )
+);
+
+stopManagerAction_->setToolTip(
+    QStringLiteral(
+        "停止当前选中的通信通道检测"
+    )
+);
         connect(startManagerAction_, &QAction::triggered, this, [this] { startManager(); });
         connect(stopManagerAction_, &QAction::triggered, this, [this] { stopManager(); });
         connect(overviewAction, &QAction::triggered, this, [this] { showOverview(); });
@@ -204,81 +258,4299 @@ private:
     }
 
     QWidget *createProjectTree()
+{
+    auto *box = new QWidget;
+    auto *layout = new QVBoxLayout(box);
+
+    layout->setContentsMargins(4, 4, 4, 4);
+
+
+    // =====================================================
+    // 搜索框
+    // =====================================================
+
+    auto *filter = new QLineEdit;
+
+    filter->setPlaceholderText(
+        QStringLiteral("查找工程对象")
+    );
+
+    layout->addWidget(filter);
+
+
+    // =====================================================
+    // 工程树
+    // =====================================================
+
+    auto *tree = new QTreeWidget;
+
+    projectTree_ = tree;
+
+    tree->setHeaderLabel(
+        QStringLiteral("对象名称")
+    );
+
+    tree->setAnimated(false);
+
+
+    auto add =
+        [&](QTreeWidgetItem *parent,
+            const QString &name,
+            QColor color,
+            int kind)
     {
-        auto *box = new QWidget;
-        auto *layout = new QVBoxLayout(box);
-        layout->setContentsMargins(4, 4, 4, 4);
-        auto *filter = new QLineEdit;
-        filter->setPlaceholderText(QStringLiteral("查找工程对象"));
-        layout->addWidget(filter);
+        auto *item =
+            parent
+                ? new QTreeWidgetItem(parent)
+                : new QTreeWidgetItem(tree);
 
-        auto *tree = new QTreeWidget;
-        projectTree_ = tree;
-        tree->setHeaderLabel(QStringLiteral("对象名称"));
-        tree->setAnimated(false);
-        auto add = [&](QTreeWidgetItem *parent, const QString &name, QColor c, int kind) {
-            auto *item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
-            item->setText(0, name);
-            item->setIcon(0, pixelIcon(c, kind));
-            return item;
-        };
-        auto *root = add(nullptr, QString(), QColor("#c8a000"), 0);
-        projectRootItem_ = root;
-        root->setData(0, Qt::UserRole, QStringLiteral("project_root"));
-        root->setHidden(true);
-        auto *channels = add(root, QStringLiteral("采集设备"), QColor("#000080"), 3);
-        auto *python = add(channels, QStringLiteral("Python 通信"), QColor("#008080"), 3);
-        auto *pythonTasks = add(python, QStringLiteral("脚本任务"), QColor("#008080"), 1);
-        pythonTasksItem_ = pythonTasks;
-        pythonTasks->setData(0, Qt::UserRole, QStringLiteral("python_tasks"));
-        pointDirectoryItem_ = add(root, QStringLiteral("点目录"), QColor("#c8a000"), 0);
-        pointDirectoryItem_->setData(0, Qt::UserRole, QStringLiteral("point_directory"));
-        root->setExpanded(true);
-        channels->setExpanded(true);
-        python->setExpanded(true);
-        tree->setCurrentItem(pythonTasks);
-        layout->addWidget(tree);
+        item->setText(0, name);
 
-        connect(filter, &QLineEdit::textChanged, tree, [tree](const QString &text) {
-            for (auto *item : tree->findItems(QStringLiteral("*"), Qt::MatchWildcard | Qt::MatchRecursive))
-                item->setHidden(!text.isEmpty() && !item->text(0).contains(text, Qt::CaseInsensitive));
-        });
-        tree->setContextMenuPolicy(Qt::CustomContextMenu);
-        connect(tree, &QTreeWidget::customContextMenuRequested, this, [this, tree](const QPoint &position) {
-            auto *item = tree->itemAt(position);
-            if (!item) return;
-            const QString kind = item->data(0, Qt::UserRole).toString();
-            QMenu menu(tree);
-            if (kind == QStringLiteral("project_root")) {
-                auto *rename = menu.addAction(QStringLiteral("修改工程名称..."));
-                if (menu.exec(tree->viewport()->mapToGlobal(position)) == rename) renameProject();
-            } else if (kind == QStringLiteral("python_tasks")) {
-                auto *create = menu.addAction(pixelIcon(QColor("#008080"), 1), QStringLiteral("新建脚本..."));
-                if (menu.exec(tree->viewport()->mapToGlobal(position)) == create) showScriptEditor();
-            } else if (kind == QStringLiteral("python_task")) {
-                auto *view = menu.addAction(QStringLiteral("查看配置"));
-                auto *edit = menu.addAction(QStringLiteral("编辑配置..."));
-                menu.addSeparator();
-                auto *remove = menu.addAction(pixelIcon(QColor("#800000"), 2), QStringLiteral("删除任务..."));
-                QAction *selected = menu.exec(tree->viewport()->mapToGlobal(position));
-                const qlonglong taskId = item->data(0, Qt::UserRole + 1).toLongLong();
-                if (selected == view) showScriptEditor(taskId, true);
-                else if (selected == edit) showScriptEditor(taskId, false);
-                else if (selected == remove) deleteScriptTask(taskId);
-            } else if (kind == QStringLiteral("point_directory")) {
-                auto *view = menu.addAction(QStringLiteral("查看点目录"));
-                if (menu.exec(tree->viewport()->mapToGlobal(position)) == view) showPointDirectory();
+        item->setIcon(
+            0,
+            pixelIcon(color, kind)
+        );
+
+        return item;
+    };
+
+
+    // =====================================================
+    // 工程根节点
+    // =====================================================
+
+    auto *root =
+        add(
+            nullptr,
+            QString(),
+            QColor("#c8a000"),
+            0
+        );
+
+    projectRootItem_ = root;
+
+    root->setData(
+        0,
+        Qt::UserRole,
+        QStringLiteral("project_root")
+    );
+
+    root->setHidden(true);
+
+
+    // =====================================================
+    // 采集设备
+    // =====================================================
+
+    auto *channels =
+        add(
+            root,
+            QStringLiteral("采集设备"),
+            QColor("#000080"),
+            3
+        );
+
+    channels->setData(
+        0,
+        Qt::UserRole,
+        QStringLiteral("channels")
+    );
+
+
+    // =====================================================
+    // Python 通信
+    // =====================================================
+
+    auto *python =
+        add(
+            channels,
+            QStringLiteral("Python 通信"),
+            QColor("#008080"),
+            3
+        );
+
+    pythonCommunicationItem_ = python;
+
+    python->setData(
+        0,
+        Qt::UserRole,
+        QStringLiteral("python_communication")
+    );
+
+
+    auto *pythonTasks =
+        add(
+            python,
+            QStringLiteral("脚本任务"),
+            QColor("#008080"),
+            1
+        );
+
+    pythonTasksItem_ = pythonTasks;
+
+    pythonTasks->setData(
+        0,
+        Qt::UserRole,
+        QStringLiteral("python_tasks")
+    );
+
+
+    // =====================================================
+    // Modbus 通信
+    // =====================================================
+
+    auto *modbus =
+        add(
+            channels,
+            QStringLiteral("Modbus 通信"),
+            QColor("#800080"),
+            3
+        );
+
+    modbusCommunicationItem_ = modbus;
+
+    modbus->setData(
+        0,
+        Qt::UserRole,
+        QStringLiteral("modbus_communication")
+    );
+
+
+    // =====================================================
+    // Modbus 采集任务目录
+    //
+    // 实际的 Modbus任务1 / Modbus任务2 ...
+    // 后面由 rebuildProjectTree() 从 modbus_tasks 动态创建。
+    // =====================================================
+
+    auto *modbusTasks =
+        add(
+            modbusCommunicationItem_,
+            QStringLiteral("采集任务"),
+            QColor("#800080"),
+            1
+        );
+
+    modbusTasksItem_ = modbusTasks;
+
+    modbusTasksItem_->setData(
+        0,
+        Qt::UserRole,
+        QStringLiteral("modbus_tasks")
+    );
+
+
+    // 点表节点以后属于具体任务，不再直接属于 Modbus 通信
+    modbusPointsItem_ = nullptr;
+
+    modbusCommunicationItem_->setExpanded(true);
+    modbusTasksItem_->setExpanded(true);
+
+
+    // =====================================================
+    // 点目录
+    // =====================================================
+
+    pointDirectoryItem_ =
+        add(
+            root,
+            QStringLiteral("点目录"),
+            QColor("#c8a000"),
+            0
+        );
+
+    pointDirectoryItem_->setData(
+        0,
+        Qt::UserRole,
+        QStringLiteral("point_directory")
+    );
+
+
+    // =====================================================
+    // 展开状态
+    // =====================================================
+
+    root->setExpanded(true);
+
+    channels->setExpanded(true);
+
+    python->setExpanded(true);
+
+
+    layout->addWidget(tree);
+
+
+    // =====================================================
+    // 搜索
+    // =====================================================
+
+    connect(
+        filter,
+        &QLineEdit::textChanged,
+        tree,
+        [tree](const QString &text)
+        {
+            for (
+                auto *item :
+                tree->findItems(
+                    QStringLiteral("*"),
+                    Qt::MatchWildcard |
+                    Qt::MatchRecursive
+                )
+            )
+            {
+                item->setHidden(
+                    !text.isEmpty()
+                    &&
+                    !item->text(0).contains(
+                        text,
+                        Qt::CaseInsensitive
+                    )
+                );
             }
+        }
+    );
+
+
+    // =====================================================
+    // 当前选中通信类型
+    //
+    // Python 通信
+    //      ↓
+    // currentCommunicationType_ = python
+    //
+    // Modbus 通信
+    //      ↓
+    // currentCommunicationType_ = modbus
+    // =====================================================
+
+    connect(
+        tree,
+        &QTreeWidget::currentItemChanged,
+        this,
+        [this](
+            QTreeWidgetItem *current,
+            QTreeWidgetItem *
+        )
+        {
+            if (!current)
+                return;
+
+            const QString kind =
+                current->data(
+                    0,
+                    Qt::UserRole
+                ).toString();
+
+
+            if (
+                kind
+                ==
+                QStringLiteral(
+                    "python_communication"
+                )
+            )
+            {
+                currentCommunicationType_ =
+                    QStringLiteral("python");
+
+                statusBar()->showMessage(
+                    QStringLiteral(
+                        "当前选择：Python 通信。点击“启动检测”可启动 Python 通信检测。"
+                    ),
+                    3000
+                );
+            }
+
+
+            else if (
+                kind
+                ==
+                QStringLiteral(
+                    "modbus_communication"
+                )
+            )
+            {
+                currentCommunicationType_ =
+                    QStringLiteral("modbus");
+
+                statusBar()->showMessage(
+                    QStringLiteral(
+                        "当前选择：Modbus 通信。点击“启动检测”可启动 Modbus 通信检测。"
+                    ),
+                    3000
+                );
+            }
+
+            else if (
+                kind
+                ==
+                QStringLiteral(
+                    "modbus_tasks"
+                )
+            )
+            {
+                currentCommunicationType_ =
+                    QStringLiteral("modbus");
+
+                statusBar()->showMessage(
+                    QStringLiteral(
+                        "当前选择：Modbus 采集任务。"
+                    ),
+                    3000
+                );
+            }
+
+
+            else if (
+                kind
+                ==
+                QStringLiteral(
+                    "modbus_task"
+                )
+            )
+            {
+                currentCommunicationType_ =
+                    QStringLiteral("modbus");
+
+                currentModbusTaskId_ =
+                    current->data(
+                        0,
+                        Qt::UserRole + 1
+                    ).toLongLong();
+
+                loadCurrentModbusTask();
+
+                statusBar()->showMessage(
+                    QStringLiteral(
+                        "当前选择：Modbus 采集任务 %1。"
+                    )
+                    .arg(
+                        currentModbusTaskId_
+                    ),
+                    3000
+                );
+            }
+
+            else if (
+                kind
+                ==
+                QStringLiteral(
+                    "modbus_points"
+                )
+            )
+            {
+                currentCommunicationType_ =
+                    QStringLiteral("modbus");
+
+                currentModbusTaskId_ =
+                    current->data(
+                        0,
+                        Qt::UserRole + 1
+                    ).toLongLong();
+
+
+                loadCurrentModbusTask();
+
+                showModbusPoints();
+
+
+                statusBar()->showMessage(
+                    QStringLiteral(
+                        "当前选择：Modbus 任务 %1 的点表。"
+                    )
+                    .arg(
+                        currentModbusTaskId_
+                    ),
+                    3000
+                );
+            }
+        }
+    );
+
+
+    // =====================================================
+    // 右键菜单
+    // =====================================================
+
+    tree->setContextMenuPolicy(
+        Qt::CustomContextMenu
+    );
+
+
+    connect(
+        tree,
+        &QTreeWidget::customContextMenuRequested,
+        this,
+        [this, tree](const QPoint &position)
+        {
+            auto *item =
+                tree->itemAt(position);
+
+            if (!item)
+                return;
+
+
+            const QString kind =
+                item->data(
+                    0,
+                    Qt::UserRole
+                ).toString();
+
+
+            QMenu menu(tree);
+
+
+            if (
+                kind
+                ==
+                QStringLiteral("project_root")
+            )
+            {
+                auto *rename =
+                    menu.addAction(
+                        QStringLiteral(
+                            "修改工程名称..."
+                        )
+                    );
+
+                if (
+                    menu.exec(
+                        tree->viewport()
+                            ->mapToGlobal(position)
+                    )
+                    ==
+                    rename
+                )
+                {
+                    renameProject();
+                }
+            }
+
+
+            else if (
+                kind
+                ==
+                QStringLiteral("python_tasks")
+            )
+            {
+                auto *create =
+                    menu.addAction(
+                        pixelIcon(
+                            QColor("#008080"),
+                            1
+                        ),
+                        QStringLiteral(
+                            "新建脚本..."
+                        )
+                    );
+
+                if (
+                    menu.exec(
+                        tree->viewport()
+                            ->mapToGlobal(position)
+                    )
+                    ==
+                    create
+                )
+                {
+                    showScriptEditor();
+                }
+            }
+
+
+            else if (
+                kind
+                ==
+                QStringLiteral("python_task")
+            )
+            {
+                auto *view =
+                    menu.addAction(
+                        QStringLiteral("查看配置")
+                    );
+
+                auto *edit =
+                    menu.addAction(
+                        QStringLiteral("编辑配置...")
+                    );
+
+                menu.addSeparator();
+
+                auto *remove =
+                    menu.addAction(
+                        pixelIcon(
+                            QColor("#800000"),
+                            2
+                        ),
+                        QStringLiteral("删除任务...")
+                    );
+
+
+                QAction *selected =
+                    menu.exec(
+                        tree->viewport()
+                            ->mapToGlobal(position)
+                    );
+
+
+                const qlonglong taskId =
+                    item->data(
+                        0,
+                        Qt::UserRole + 1
+                    ).toLongLong();
+
+
+                if (selected == view)
+                {
+                    showScriptEditor(
+                        taskId,
+                        true
+                    );
+                }
+                else if (selected == edit)
+                {
+                    showScriptEditor(
+                        taskId,
+                        false
+                    );
+                }
+                else if (selected == remove)
+                {
+                    deleteScriptTask(taskId);
+                }
+            }
+
+            else if (
+                kind
+                ==
+                QStringLiteral(
+                    "modbus_tasks"
+                )
+            )
+            {
+                auto *createTask =
+                    menu.addAction(
+                        pixelIcon(
+                            QColor("#008000"),
+                            4
+                        ),
+                        QStringLiteral(
+                            "新建 Modbus 任务"
+                        )
+                    );
+
+
+                QAction *selected =
+                    menu.exec(
+                        tree->viewport()
+                            ->mapToGlobal(
+                                position
+                            )
+                    );
+
+
+                if (
+                    selected
+                    ==
+                    createTask
+                )
+                {
+                    createNewModbusTask();
+                }
+            }
+
+                else if (
+                    kind
+                    ==
+                    QStringLiteral(
+                        "modbus_task"
+                    )
+                )
+                {
+                    auto *editTask =
+                        menu.addAction(
+                            QStringLiteral(
+                                "编辑任务"
+                            )
+                        );
+
+
+                    menu.addSeparator();
+
+
+                    auto *deleteTask =
+                        menu.addAction(
+                            QStringLiteral(
+                                "删除任务"
+                            )
+                        );
+
+
+                    QAction *selected =
+                        menu.exec(
+                            tree->viewport()
+                                ->mapToGlobal(
+                                    position
+                                )
+                        );
+
+
+                    // =====================================================
+                    // 编辑任务
+                    // =====================================================
+
+                    if (
+                        selected
+                        ==
+                        editTask
+                    )
+                    {
+                        currentCommunicationType_ =
+                            QStringLiteral("modbus");
+
+                        currentModbusTaskId_ =
+                            item->data(
+                                0,
+                                Qt::UserRole + 1
+                            )
+                            .toLongLong();
+
+
+                        tree->setCurrentItem(
+                            item
+                        );
+
+
+                        loadCurrentModbusTask();
+
+
+                        statusBar()->showMessage(
+                            QStringLiteral(
+                                "正在编辑 Modbus 任务 %1。"
+                            )
+                            .arg(
+                                currentModbusTaskId_
+                            ),
+                            2500
+                        );
+                    }
+
+
+                    // =====================================================
+                    // 删除任务
+                    // =====================================================
+
+                    else if (
+                        selected
+                        ==
+                        deleteTask
+                    )
+                    {
+                        const qlonglong taskId =
+                            item->data(
+                                0,
+                                Qt::UserRole + 1
+                            )
+                            .toLongLong();
+
+
+                        deleteModbusTask(
+                            taskId
+                        );
+                    }
+                }
+
+            else if (
+                kind
+                ==
+                QStringLiteral(
+                    "modbus_communication"
+                )
+            )
+            {
+                auto *start =
+                    menu.addAction(
+                        pixelIcon(
+                            QColor("#008000"),
+                            4
+                        ),
+                        QStringLiteral(
+                            "启动 Modbus 检测"
+                        )
+                    );
+
+                auto *stop =
+                    menu.addAction(
+                        pixelIcon(
+                            QColor("#800000"),
+                            2
+                        ),
+                        QStringLiteral(
+                            "停止 Modbus 检测"
+                        )
+                    );
+
+
+                QAction *selected =
+                    menu.exec(
+                        tree->viewport()
+                            ->mapToGlobal(position)
+                    );
+
+
+                if (selected == start)
+                {
+                    currentCommunicationType_ =
+                        QStringLiteral("modbus");
+
+                    startManager();
+                }
+                else if (selected == stop)
+                {
+                    currentCommunicationType_ =
+                        QStringLiteral("modbus");
+
+                    stopManager();
+                }
+            }
+
+
+            else if (
+                kind
+                ==
+                QStringLiteral(
+                    "point_directory"
+                )
+            )
+            {
+                auto *view =
+                    menu.addAction(
+                        QStringLiteral(
+                            "查看点目录"
+                        )
+                    );
+
+                if (
+                    menu.exec(
+                        tree->viewport()
+                            ->mapToGlobal(position)
+                    )
+                    ==
+                    view
+                )
+                {
+                    showPointDirectory();
+                }
+            }
+        }
+    );
+
+
+    // =====================================================
+    // 双击
+    // =====================================================
+
+    connect(
+        tree,
+        &QTreeWidget::itemDoubleClicked,
+        this,
+        [this](QTreeWidgetItem *item)
+        {
+            if (!item)
+                return;
+
+
+            const QString kind =
+                item->data(
+                    0,
+                    Qt::UserRole
+                ).toString();
+
+
+            if (
+                kind
+                ==
+                QStringLiteral("python_tasks")
+            )
+            {
+                showScriptEditor();
+            }
+
+
+            else if (
+                kind
+                ==
+                QStringLiteral("python_task")
+            )
+            {
+                showScriptEditor(
+                    item->data(
+                        0,
+                        Qt::UserRole + 1
+                    ).toLongLong(),
+                    false
+                );
+            }
+
+
+            else if (
+                kind
+                ==
+                QStringLiteral(
+                    "modbus_communication"
+                )
+            )
+            {
+                currentCommunicationType_ =
+                    QStringLiteral("modbus");
+            }
+
+
+            else if (
+                kind
+                ==
+                QStringLiteral(
+                    "point_directory"
+                )
+            )
+            {
+                showPointDirectory();
+            }
+        }
+    );
+
+
+    return box;
+}
+
+QWidget *createModbusPointsPage()
+{
+    auto *page = new QWidget;
+    auto *layout = new QVBoxLayout(page);
+
+    // =========================================================
+    // 顶部标题
+    // =========================================================
+
+    auto *title =
+        new QLabel(
+            QStringLiteral(" Modbus 点表配置")
+        );
+
+    title->setStyleSheet(
+        QStringLiteral(
+            "background:#000080;"
+            "color:white;"
+            "font-weight:bold;"
+            "padding:5px;"
+        )
+    );
+
+    layout->addWidget(title);
+
+
+    // =========================================================
+    // 工具栏
+    // =========================================================
+
+    auto *bar =
+        new QHBoxLayout;
+
+    auto *addButton =
+        new QPushButton(
+            QStringLiteral("新建点")
+        );
+
+    auto *editButton =
+        new QPushButton(
+            QStringLiteral("修改点")
+        );
+
+    auto *deleteButton =
+        new QPushButton(
+            QStringLiteral("删除点")
+        );
+
+    auto *saveButton =
+        new QPushButton(
+            QStringLiteral("保存点表")
+        );
+
+    bar->addWidget(addButton);
+    bar->addWidget(editButton);
+    bar->addWidget(deleteButton);
+
+    bar->addSpacing(12);
+
+    bar->addWidget(saveButton);
+
+    bar->addStretch();
+
+    auto *hint =
+        new QLabel(
+            QStringLiteral(
+                "修改后点击“保存点表”，"
+                "再点击顶部“启动检测”使配置生效"
+            )
+        );
+
+    hint->setStyleSheet(
+        QStringLiteral(
+            "color:#000080;"
+        )
+    );
+
+    bar->addWidget(hint);
+
+    layout->addLayout(bar);
+
+
+    // =========================================================
+    // 点表
+    // =========================================================
+
+    modbusPointsTable_ =
+        new QTableWidget(
+            0,
+            5
+        );
+
+    modbusPointsTable_->setHorizontalHeaderLabels({
+        QStringLiteral("点名"),
+        QStringLiteral("Modbus地址"),
+        QStringLiteral("读写方向"),
+        QStringLiteral("数据类型"),
+        QStringLiteral("大小端转换")
+    });
+
+    modbusPointsTable_->setAlternatingRowColors(true);
+
+    modbusPointsTable_->setSelectionBehavior(
+        QAbstractItemView::SelectRows
+    );
+
+    modbusPointsTable_->setSelectionMode(
+        QAbstractItemView::SingleSelection
+    );
+
+    // 点名和 Modbus 地址可直接双击编辑。
+    modbusPointsTable_->setEditTriggers(
+        QAbstractItemView::DoubleClicked
+        |
+        QAbstractItemView::EditKeyPressed
+        |
+        QAbstractItemView::SelectedClicked
+    );
+
+    modbusPointsTable_->horizontalHeader()
+        ->setSectionResizeMode(
+            0,
+            QHeaderView::Stretch
+        );
+
+    modbusPointsTable_->setColumnWidth(
+        1,
+        110
+    );
+
+    modbusPointsTable_->setColumnWidth(
+        2,
+        110
+    );
+
+    modbusPointsTable_->setColumnWidth(
+        3,
+        110
+    );
+
+    modbusPointsTable_->setColumnWidth(
+        4,
+        120
+    );
+
+    layout->addWidget(
+        modbusPointsTable_
+    );
+
+
+    // =========================================================
+    // 第一阶段暂时只验证页面
+    //
+    // 下一阶段：
+    // 新建 / 修改 / 删除 / 保存 -> SQLite
+    // =========================================================
+
+    connect(
+    addButton,
+    &QPushButton::clicked,
+    this,
+    [this]
+    {
+        if (!modbusPointsTable_)
+            return;
+
+        // =====================================================
+        // 新点名称：test1 / test2 / test3 ...
+        // =====================================================
+
+        int testIndex = 1;
+
+        while (true)
+        {
+            const QString candidate =
+                QStringLiteral("test%1")
+                .arg(testIndex);
+
+            bool exists = false;
+
+            for (
+                int row = 0;
+                row < modbusPointsTable_->rowCount();
+                ++row
+            )
+            {
+                QTableWidgetItem *item =
+                    modbusPointsTable_->item(
+                        row,
+                        0
+                    );
+
+                if (
+                    item
+                    &&
+                    item->text()
+                    ==
+                    candidate
+                )
+                {
+                    exists = true;
+                    break;
+                }
+            }
+
+            if (!exists)
+                break;
+
+            ++testIndex;
+        }
+
+        const QString pointName =
+            QStringLiteral("test%1")
+            .arg(testIndex);
+
+
+        // =====================================================
+        // 自动生成下一个 Modbus 地址
+        //
+        // 默认从 40001 开始
+        // =====================================================
+
+        int nextAddress = 40001;
+
+        for (
+            int row = 0;
+            row < modbusPointsTable_->rowCount();
+            ++row
+        )
+        {
+            QTableWidgetItem *addressItem =
+                modbusPointsTable_->item(
+                    row,
+                    1
+                );
+
+            if (!addressItem)
+                continue;
+
+            bool ok = false;
+
+            const int address =
+                addressItem->text().toInt(&ok);
+
+            if (
+                ok
+                &&
+                address >= nextAddress
+            )
+            {
+                nextAddress =
+                    address + 1;
+            }
+        }
+
+
+        // =====================================================
+        // 新增表格行
+        // =====================================================
+
+        const int row =
+            modbusPointsTable_->rowCount();
+
+        modbusPointsTable_->insertRow(row);
+
+
+        // =====================================================
+        // 第0列：点名
+        // =====================================================
+
+        auto *nameItem =
+            new QTableWidgetItem(
+                pointName
+            );
+
+        // id = -1 表示这是新建点，还没有写入数据库
+        nameItem->setData(
+            Qt::UserRole,
+            -1
+        );
+
+        // 默认 Slave ID = 1
+        nameItem->setData(
+            Qt::UserRole + 1,
+            1
+        );
+
+        // 默认 function = 3
+        nameItem->setData(
+            Qt::UserRole + 2,
+            3
+        );
+
+        // 默认原始地址
+        nameItem->setData(
+            Qt::UserRole + 3,
+            nextAddress - 40001
+        );
+
+        modbusPointsTable_->setItem(
+            row,
+            0,
+            nameItem
+        );
+
+
+        // =====================================================
+        // 第1列：Modbus 地址
+        // =====================================================
+
+        auto *addressItem = new QTableWidgetItem(
+            QString::number(nextAddress));
+        addressItem->setToolTip(
+            QStringLiteral(
+                "可配置地址段：00001~09999、10001~19999、"
+                "30001~39999、40001~49999"));
+        modbusPointsTable_->setItem(row, 1, addressItem);
+
+
+        // =====================================================
+        // 第2列：读写方向
+        // 默认 INPUT
+        // =====================================================
+
+        auto *directionCombo =
+            new QComboBox;
+
+        directionCombo->addItems({
+            QStringLiteral("INPUT"),
+            QStringLiteral("OUTPUT")
         });
-        connect(tree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item) {
-            const QString kind = item->data(0, Qt::UserRole).toString();
-            if (kind == QStringLiteral("python_tasks")) showScriptEditor();
-            else if (kind == QStringLiteral("python_task"))
-                showScriptEditor(item->data(0, Qt::UserRole + 1).toLongLong(), false);
-            else if (kind == QStringLiteral("point_directory")) showPointDirectory();
+
+        directionCombo->setCurrentText(
+            QStringLiteral("INPUT")
+        );
+
+        modbusPointsTable_->setCellWidget(
+            row,
+            2,
+            directionCombo
+        );
+
+
+        // =====================================================
+        // 第3列：数据类型
+        // 默认 INT16
+        // =====================================================
+
+        auto *datatypeCombo =
+            new QComboBox;
+
+        datatypeCombo->addItems({
+            QStringLiteral("INT16"),
+            QStringLiteral("UINT16"),
+            QStringLiteral("INT32"),
+            QStringLiteral("UINT32"),
+            QStringLiteral("FLOAT"),
+            QStringLiteral("DOUBLE")
         });
-        return box;
+
+        datatypeCombo->setCurrentText(
+            QStringLiteral("INT16")
+        );
+
+        modbusPointsTable_->setCellWidget(
+            row,
+            3,
+            datatypeCombo
+        );
+
+
+        // =====================================================
+        // 第4列：大小端
+        // 默认 ABCD
+        // =====================================================
+
+        auto *byteOrderCombo =
+            new QComboBox;
+
+        byteOrderCombo->addItems({
+            QStringLiteral("ABCD"),
+            QStringLiteral("BADC"),
+            QStringLiteral("CDAB"),
+            QStringLiteral("DCBA")
+        });
+
+        byteOrderCombo->setCurrentText(
+            QStringLiteral("ABCD")
+        );
+
+        modbusPointsTable_->setCellWidget(
+            row,
+            4,
+            byteOrderCombo
+        );
+
+
+
+        // =====================================================
+        // 自动选中新建行
+        // =====================================================
+
+        modbusPointsTable_->selectRow(
+            row
+        );
+
+        modbusPointsTable_->scrollToItem(
+            nameItem
+        );
+
+        statusBar()->showMessage(
+            QStringLiteral(
+                "已新建 Modbus 点：%1，可双击 Modbus地址自定义位置"
+            )
+            .arg(pointName),
+            2000
+        );
     }
+);
+
+    connect(
+        editButton,
+        &QPushButton::clicked,
+        this,
+        [this]
+        {
+            if (!modbusPointsTable_)
+                return;
+
+            const int row = modbusPointsTable_->currentRow();
+            if (row < 0)
+            {
+                QMessageBox::information(
+                    this,
+                    QStringLiteral("修改 Modbus 点"),
+                    QStringLiteral("请先选择要修改的点。"));
+                return;
+            }
+
+            auto *nameItem = modbusPointsTable_->item(row, 0);
+            auto *addressItem = modbusPointsTable_->item(row, 1);
+            auto *directionCombo = qobject_cast<QComboBox *>(
+                modbusPointsTable_->cellWidget(row, 2));
+            if (!nameItem || !addressItem || !directionCombo)
+                return;
+
+            bool accepted = false;
+            const QString addressText = QInputDialog::getText(
+                this,
+                QStringLiteral("修改 Modbus 位置"),
+                QStringLiteral(
+                    "点：%1\n"
+                    "输入标准 Modbus 地址：\n"
+                    "00001~09999  线圈\n"
+                    "10001~19999  离散输入\n"
+                    "30001~39999  输入寄存器\n"
+                    "40001~49999  保持寄存器")
+                    .arg(nameItem->text()),
+                QLineEdit::Normal,
+                addressItem->text(),
+                &accepted).trimmed();
+
+            if (!accepted)
+                return;
+
+            bool addressOk = false;
+            const int address = addressText.toInt(&addressOk);
+            const bool supported =
+                (address >= 1 && address <= 9999)
+                || (address >= 10001 && address <= 19999)
+                || (address >= 30001 && address <= 39999)
+                || (address >= 40001 && address <= 49999);
+
+            if (!addressOk || !supported)
+            {
+                QMessageBox::warning(
+                    this,
+                    QStringLiteral("地址无效"),
+                    QStringLiteral("请输入支持的标准 Modbus 地址。"));
+                return;
+            }
+
+            if (directionCombo->currentText() == QStringLiteral("OUTPUT")
+                && !(address >= 40001 && address <= 49999))
+            {
+                QMessageBox::warning(
+                    this,
+                    QStringLiteral("输出地址无效"),
+                    QStringLiteral(
+                        "OUTPUT 点必须使用可写的保持寄存器地址 "
+                        "40001~49999。"));
+                return;
+            }
+
+            addressItem->setText(QString::number(address));
+            statusBar()->showMessage(
+                QStringLiteral("已将点 %1 的 Modbus 地址修改为 %2，请点击“保存点表”")
+                    .arg(nameItem->text(), QString::number(address)),
+                3000);
+        }
+    );
+
+    connect(
+    deleteButton,
+    &QPushButton::clicked,
+    this,
+    [this]
+    {
+        if (!modbusPointsTable_)
+            return;
+
+        // =====================================================
+        // 获取当前选择的行
+        // =====================================================
+
+        const int row =
+            modbusPointsTable_->currentRow();
+
+        if (
+            row < 0
+            ||
+            row >= modbusPointsTable_->rowCount()
+        )
+        {
+            QMessageBox::information(
+                this,
+                QStringLiteral("删除 Modbus 点"),
+                QStringLiteral(
+                    "请先选择要删除的点。"
+                )
+            );
+
+            return;
+        }
+
+
+        // =====================================================
+        // 获取点名
+        // =====================================================
+
+        QTableWidgetItem *nameItem =
+            modbusPointsTable_->item(
+                row,
+                0
+            );
+
+        const QString pointName =
+            nameItem
+            ?
+            nameItem->text()
+            :
+            QStringLiteral("未命名点");
+
+
+        // =====================================================
+        // 删除前确认
+        // =====================================================
+
+        const QMessageBox::StandardButton answer =
+            QMessageBox::question(
+                this,
+                QStringLiteral("删除 Modbus 点"),
+                QStringLiteral(
+                    "确定要删除点“%1”吗？\n\n"
+                    "当前操作只修改点表，"
+                    "点击“保存点表”后才会同步到 Modbus 配置数据库。"
+                )
+                .arg(pointName),
+                QMessageBox::Yes
+                |
+                QMessageBox::No,
+                QMessageBox::No
+            );
+
+        if (
+            answer
+            !=
+            QMessageBox::Yes
+        )
+        {
+            return;
+        }
+
+
+        // =====================================================
+        // 从当前表格删除
+        // =====================================================
+
+        modbusPointsTable_->removeRow(
+            row
+        );
+
+
+        // =====================================================
+        // 删除后选择附近的一行
+        // =====================================================
+
+        if (
+            modbusPointsTable_->rowCount()
+            >
+            0
+        )
+        {
+            int newRow = row;
+
+            if (
+                newRow
+                >=
+                modbusPointsTable_->rowCount()
+            )
+            {
+                newRow =
+                    modbusPointsTable_->rowCount()
+                    -
+                    1;
+            }
+
+            modbusPointsTable_->selectRow(
+                newRow
+            );
+        }
+
+
+        statusBar()->showMessage(
+            QStringLiteral(
+                "已从当前点表删除 Modbus 点：%1"
+            )
+            .arg(pointName),
+            2500
+        );
+    }
+);
+
+    connect(
+    saveButton,
+    &QPushButton::clicked,
+    this,
+    [this]
+    {
+        saveModbusPointsTable();
+    }
+);
+
+
+    return page;
+}
+
+void loadCurrentModbusTask()
+{
+    if (
+        currentModbusTaskId_
+        <=
+        0
+    )
+    {
+        return;
+    }
+
+
+    const QString connectionName =
+        QStringLiteral(
+            "modbus_task_load_%1"
+        )
+        .arg(
+            reinterpret_cast<quintptr>(
+                this
+            )
+        );
+
+
+    {
+        QSqlDatabase db =
+            QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"),
+                connectionName
+            );
+
+        db.setDatabaseName(
+            modbusConfigDatabase_
+        );
+
+
+        if (!db.open())
+        {
+            QMessageBox::warning(
+                this,
+                QStringLiteral(
+                    "Modbus 任务"
+                ),
+                QStringLiteral(
+                    "无法打开 Modbus 配置数据库：\n%1"
+                )
+                .arg(
+                    db.lastError().text()
+                )
+            );
+
+            return;
+        }
+
+
+        QSqlQuery query(db);
+
+        query.prepare(
+            QStringLiteral(
+                "SELECT "
+                "name, "
+                "host, "
+                "port, "
+                "slave_id, "
+                "period, "
+                "timeout, "
+                "retry_count, "
+                "reconnect_interval, "
+                "enable "
+                "FROM modbus_tasks "
+                "WHERE id = ?"
+            )
+        );
+
+        query.addBindValue(
+            currentModbusTaskId_
+        );
+
+
+        if (
+            query.exec()
+            &&
+            query.next()
+        )
+        {
+            if (modbusTaskNameEdit_)
+            {
+                modbusTaskNameEdit_->setText(
+                    query.value(0).toString()
+                );
+            }
+
+
+            if (modbusTaskHostEdit_)
+            {
+                modbusTaskHostEdit_->setText(
+                    query.value(1).toString()
+                );
+            }
+
+
+            if (modbusTaskPortEdit_)
+            {
+                modbusTaskPortEdit_->setText(
+                    QString::number(
+                        query.value(2).toInt()
+                    )
+                );
+            }
+
+
+            if (modbusTaskSlaveEdit_)
+            {
+                modbusTaskSlaveEdit_->setText(
+                    QString::number(
+                        query.value(3).toInt()
+                    )
+                );
+            }
+
+
+            if (modbusTaskPeriodEdit_)
+            {
+                modbusTaskPeriodEdit_->setText(
+                    QStringLiteral("%1 ms")
+                    .arg(
+                        query.value(4).toInt()
+                    )
+                );
+            }
+
+
+            if (modbusTaskTimeoutEdit_)
+            {
+                modbusTaskTimeoutEdit_->setText(
+                    QStringLiteral("%1 ms")
+                    .arg(
+                        query.value(5).toInt()
+                    )
+                );
+            }
+
+
+            if (modbusTaskRetryEdit_)
+            {
+                modbusTaskRetryEdit_->setText(
+                    QString::number(
+                        query.value(6).toInt()
+                    )
+                );
+            }
+
+
+            if (modbusTaskReconnectEdit_)
+            {
+                modbusTaskReconnectEdit_->setText(
+                    QStringLiteral("%1 ms")
+                    .arg(
+                        query.value(7).toInt()
+                    )
+                );
+            }
+
+
+            if (modbusTaskProtocolEdit_)
+            {
+                modbusTaskProtocolEdit_->setText(
+                    QStringLiteral(
+                        "Modbus TCP"
+                    )
+                );
+            }
+
+
+            if (modbusTaskRoleEdit_)
+            {
+                modbusTaskRoleEdit_->setText(
+                    QStringLiteral(
+                        "主站"
+                    )
+                );
+            }
+        }
+
+
+        db.close();
+    }
+
+
+    QSqlDatabase::removeDatabase(
+        connectionName
+    );
+}
+
+void saveCurrentModbusTask()
+{
+    if (
+        currentModbusTaskId_
+        <=
+        0
+    )
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral(
+                "保存 Modbus 任务"
+            ),
+            QStringLiteral(
+                "请先在左侧选择一个 Modbus 采集任务。"
+            )
+        );
+
+        return;
+    }
+
+
+    if (
+        !modbusTaskNameEdit_
+        ||
+        !modbusTaskHostEdit_
+        ||
+        !modbusTaskPortEdit_
+        ||
+        !modbusTaskSlaveEdit_
+        ||
+        !modbusTaskPeriodEdit_
+        ||
+        !modbusTaskTimeoutEdit_
+        ||
+        !modbusTaskRetryEdit_
+        ||
+        !modbusTaskReconnectEdit_
+    )
+    {
+        return;
+    }
+
+
+    const QString name =
+        modbusTaskNameEdit_
+        ->text()
+        .trimmed();
+
+    const QString host =
+        modbusTaskHostEdit_
+        ->text()
+        .trimmed();
+
+
+    bool portOk = false;
+    bool slaveOk = false;
+    bool periodOk = false;
+    bool timeoutOk = false;
+    bool retryOk = false;
+    bool reconnectOk = false;
+
+
+    const int port =
+        modbusTaskPortEdit_
+        ->text()
+        .trimmed()
+        .toInt(
+            &portOk
+        );
+
+    const int slaveId =
+        modbusTaskSlaveEdit_
+        ->text()
+        .trimmed()
+        .toInt(
+            &slaveOk
+        );
+
+
+    // 允许输入：
+    // 1000
+    // 或
+    // 1000 ms
+
+    QString periodText =
+        modbusTaskPeriodEdit_
+        ->text()
+        .trimmed();
+
+    periodText.remove(
+        QStringLiteral("ms"),
+        Qt::CaseInsensitive
+    );
+
+    const int period =
+        periodText
+        .trimmed()
+        .toInt(
+            &periodOk
+        );
+
+
+    QString timeoutText =
+        modbusTaskTimeoutEdit_
+        ->text()
+        .trimmed();
+
+    timeoutText.remove(
+        QStringLiteral("ms"),
+        Qt::CaseInsensitive
+    );
+
+    const int timeout =
+        timeoutText
+        .trimmed()
+        .toInt(
+            &timeoutOk
+        );
+
+
+    const int retryCount =
+        modbusTaskRetryEdit_
+        ->text()
+        .trimmed()
+        .toInt(
+            &retryOk
+        );
+
+
+    QString reconnectText =
+        modbusTaskReconnectEdit_
+        ->text()
+        .trimmed();
+
+    reconnectText.remove(
+        QStringLiteral("ms"),
+        Qt::CaseInsensitive
+    );
+
+    const int reconnectInterval =
+        reconnectText
+        .trimmed()
+        .toInt(
+            &reconnectOk
+        );
+
+
+    // =====================================================
+    // 参数检查
+    // =====================================================
+
+    if (name.isEmpty())
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "保存 Modbus 任务"
+            ),
+            QStringLiteral(
+                "任务名称不能为空。"
+            )
+        );
+
+        return;
+    }
+
+
+    if (host.isEmpty())
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "保存 Modbus 任务"
+            ),
+            QStringLiteral(
+                "IP 地址不能为空。"
+            )
+        );
+
+        return;
+    }
+
+
+    if (
+        !portOk
+        ||
+        port <= 0
+        ||
+        port > 65535
+    )
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "保存 Modbus 任务"
+            ),
+            QStringLiteral(
+                "端口必须在 1~65535 之间。"
+            )
+        );
+
+        return;
+    }
+
+
+    if (
+        !slaveOk
+        ||
+        slaveId < 1
+        ||
+        slaveId > 247
+    )
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "保存 Modbus 任务"
+            ),
+            QStringLiteral(
+                "Unit ID 必须在 1~247 之间。"
+            )
+        );
+
+        return;
+    }
+
+
+    if (
+        !periodOk
+        ||
+        period <= 0
+    )
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "保存 Modbus 任务"
+            ),
+            QStringLiteral(
+                "采集周期必须大于 0 ms。"
+            )
+        );
+
+        return;
+    }
+
+
+    if (
+        !timeoutOk
+        ||
+        timeout <= 0
+    )
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "保存 Modbus 任务"
+            ),
+            QStringLiteral(
+                "响应超时必须大于 0 ms。"
+            )
+        );
+
+        return;
+    }
+
+
+    if (
+        !retryOk
+        ||
+        retryCount < 0
+    )
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "保存 Modbus 任务"
+            ),
+            QStringLiteral(
+                "重试次数不能小于 0。"
+            )
+        );
+
+        return;
+    }
+
+
+    if (
+        !reconnectOk
+        ||
+        reconnectInterval <= 0
+    )
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "保存 Modbus 任务"
+            ),
+            QStringLiteral(
+                "重连间隔必须大于 0 ms。"
+            )
+        );
+
+        return;
+    }
+
+
+    // =====================================================
+    // 保存数据库
+    // =====================================================
+
+    const QString connectionName =
+        QStringLiteral(
+            "modbus_task_save_%1"
+        )
+        .arg(
+            reinterpret_cast<quintptr>(
+                this
+            )
+        );
+
+
+    bool success = false;
+    QString errorMessage;
+
+
+    {
+        QSqlDatabase db =
+            QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"),
+                connectionName
+            );
+
+        db.setDatabaseName(
+            modbusConfigDatabase_
+        );
+
+
+        if (db.open())
+        {
+            QSqlQuery query(db);
+
+            query.prepare(
+                QStringLiteral(
+                    "UPDATE modbus_tasks "
+                    "SET "
+                    "name = ?, "
+                    "host = ?, "
+                    "port = ?, "
+                    "slave_id = ?, "
+                    "period = ?, "
+                    "timeout = ?, "
+                    "retry_count = ?, "
+                    "reconnect_interval = ? "
+                    "WHERE id = ?"
+                )
+            );
+
+
+            query.addBindValue(name);
+            query.addBindValue(host);
+            query.addBindValue(port);
+            query.addBindValue(slaveId);
+            query.addBindValue(period);
+            query.addBindValue(timeout);
+            query.addBindValue(retryCount);
+            query.addBindValue(
+                reconnectInterval
+            );
+            query.addBindValue(
+                currentModbusTaskId_
+            );
+
+
+            if (query.exec())
+            {
+                success = true;
+
+
+                // =================================================
+                // 过渡阶段：
+                // 当前 Collector 仍然读 modbus_points.period，
+                // 因此将任务周期同步给该任务下面的旧点字段。
+                // =================================================
+
+                QSqlQuery pointQuery(db);
+
+                pointQuery.prepare(
+                    QStringLiteral(
+                        "UPDATE modbus_points "
+                        "SET period = ?, "
+                        "slave_id = ? "
+                        "WHERE task_id = ?"
+                    )
+                );
+
+                pointQuery.addBindValue(
+                    period
+                );
+
+                pointQuery.addBindValue(
+                    slaveId
+                );
+
+                pointQuery.addBindValue(
+                    currentModbusTaskId_
+                );
+
+                if (!pointQuery.exec())
+                {
+                    success = false;
+
+                    errorMessage =
+                        pointQuery
+                        .lastError()
+                        .text();
+                }
+            }
+            else
+            {
+                errorMessage =
+                    query.lastError().text();
+            }
+
+
+            db.close();
+        }
+        else
+        {
+            errorMessage =
+                db.lastError().text();
+        }
+    }
+
+
+    QSqlDatabase::removeDatabase(
+        connectionName
+    );
+
+
+    if (!success)
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "保存 Modbus 任务"
+            ),
+            QStringLiteral(
+                "保存失败：\n%1"
+            )
+            .arg(
+                errorMessage
+            )
+        );
+
+        return;
+    }
+
+
+    // 统一格式重新显示
+    modbusTaskPeriodEdit_->setText(
+        QStringLiteral("%1 ms")
+        .arg(period)
+    );
+
+    modbusTaskTimeoutEdit_->setText(
+        QStringLiteral("%1 ms")
+        .arg(timeout)
+    );
+
+    modbusTaskReconnectEdit_->setText(
+        QStringLiteral("%1 ms")
+        .arg(
+            reconnectInterval
+        )
+    );
+
+
+    // 任务名称可能发生变化，
+    // 所以重新生成左侧任务树
+    rebuildProjectTree();
+
+
+    statusBar()->showMessage(
+        QStringLiteral(
+            "Modbus 任务“%1”保存成功。"
+        )
+        .arg(name),
+        3000
+    );
+}
+
+void createNewModbusTask()
+{
+    const QString connectionName =
+        QStringLiteral(
+            "modbus_task_create_%1"
+        )
+        .arg(
+            reinterpret_cast<quintptr>(
+                this
+            )
+        );
+
+
+    bool success = false;
+    QString errorMessage;
+
+    qlonglong newTaskId = -1;
+    QString newTaskName;
+
+
+    {
+        QSqlDatabase db =
+            QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"),
+                connectionName
+            );
+
+        db.setDatabaseName(
+            modbusConfigDatabase_
+        );
+
+
+        // =====================================================
+        // 打开数据库
+        // =====================================================
+
+        if (!db.open())
+        {
+            errorMessage =
+                db.lastError().text();
+        }
+        else
+        {
+            // =================================================
+            // 自动寻找可用任务名
+            //
+            // 已有：
+            // Modbus任务1
+            // Modbus任务2
+            //
+            // 则自动创建：
+            // Modbus任务3
+            // =================================================
+
+            int taskIndex = 1;
+
+            while (true)
+            {
+                const QString candidate =
+                    QStringLiteral(
+                        "Modbus任务%1"
+                    )
+                    .arg(taskIndex);
+
+
+                QSqlQuery checkQuery(db);
+
+                checkQuery.prepare(
+                    QStringLiteral(
+                        "SELECT COUNT(*) "
+                        "FROM modbus_tasks "
+                        "WHERE name = ?"
+                    )
+                );
+
+                checkQuery.addBindValue(
+                    candidate
+                );
+
+
+                bool exists = false;
+
+                if (
+                    checkQuery.exec()
+                    &&
+                    checkQuery.next()
+                )
+                {
+                    exists =
+                        checkQuery
+                        .value(0)
+                        .toInt()
+                        >
+                        0;
+                }
+
+
+                if (!exists)
+                {
+                    newTaskName =
+                        candidate;
+
+                    break;
+                }
+
+
+                ++taskIndex;
+            }
+
+
+            // =================================================
+            // 创建新的 Modbus 任务
+            // =================================================
+
+            QSqlQuery insertQuery(db);
+
+            insertQuery.prepare(
+                QStringLiteral(
+                    "INSERT INTO modbus_tasks "
+                    "("
+                    "name, "
+                    "host, "
+                    "port, "
+                    "slave_id, "
+                    "period, "
+                    "timeout, "
+                    "retry_count, "
+                    "reconnect_interval, "
+                    "enable"
+                    ") "
+                    "VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+            );
+
+
+            insertQuery.addBindValue(
+                newTaskName
+            );
+
+            insertQuery.addBindValue(
+                QStringLiteral(
+                    "127.0.0.1"
+                )
+            );
+
+            insertQuery.addBindValue(
+                502
+            );
+
+            insertQuery.addBindValue(
+                1
+            );
+
+            // 默认采集周期
+            insertQuery.addBindValue(
+                1000
+            );
+
+            // 默认响应超时
+            insertQuery.addBindValue(
+                1000
+            );
+
+            // 默认重试次数
+            insertQuery.addBindValue(
+                2
+            );
+
+            // 默认重连间隔
+            insertQuery.addBindValue(
+                3000
+            );
+
+            // 默认启用
+            insertQuery.addBindValue(
+                1
+            );
+
+
+            if (insertQuery.exec())
+            {
+                newTaskId =
+                    insertQuery
+                    .lastInsertId()
+                    .toLongLong();
+
+                success = true;
+            }
+            else
+            {
+                errorMessage =
+                    insertQuery
+                    .lastError()
+                    .text();
+            }
+
+
+            db.close();
+        }
+    }
+
+
+    QSqlDatabase::removeDatabase(
+        connectionName
+    );
+
+
+    // =====================================================
+    // 创建失败
+    // =====================================================
+
+    if (!success)
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "新建 Modbus 任务"
+            ),
+            QStringLiteral(
+                "创建 Modbus 任务失败：\n%1"
+            )
+            .arg(
+                errorMessage
+            )
+        );
+
+        return;
+    }
+
+
+    // =====================================================
+    // 当前任务切换到刚刚创建的任务
+    // =====================================================
+
+    currentCommunicationType_ =
+        QStringLiteral("modbus");
+
+    currentModbusTaskId_ =
+        newTaskId;
+
+
+    // =====================================================
+    // 刷新左侧工程树
+    // =====================================================
+
+    rebuildProjectTree();
+
+
+    // =====================================================
+    // 在树中找到刚创建的任务并选中
+    // =====================================================
+
+    if (modbusTasksItem_)
+    {
+        for (
+            int index = 0;
+            index < modbusTasksItem_->childCount();
+            ++index
+        )
+        {
+            QTreeWidgetItem *taskItem =
+                modbusTasksItem_->child(
+                    index
+                );
+
+            if (!taskItem)
+            {
+                continue;
+            }
+
+
+            const qlonglong taskId =
+                taskItem->data(
+                    0,
+                    Qt::UserRole + 1
+                )
+                .toLongLong();
+
+
+            if (
+                taskId
+                ==
+                newTaskId
+            )
+            {
+                if (projectTree_)
+                {
+                    projectTree_->setCurrentItem(
+                        taskItem
+                    );
+                }
+
+                taskItem->setExpanded(
+                    true
+                );
+
+                break;
+            }
+        }
+    }
+
+
+    // =====================================================
+    // 右侧显示新任务配置
+    // =====================================================
+
+    loadCurrentModbusTask();
+
+
+    statusBar()->showMessage(
+        QStringLiteral(
+            "已创建 Modbus 采集任务：%1"
+        )
+        .arg(
+            newTaskName
+        ),
+        3000
+    );
+}
+
+void deleteModbusTask(
+    qlonglong taskId
+)
+{
+    if (taskId <= 0)
+    {
+        return;
+    }
+
+
+    const QString connectionName =
+        QStringLiteral(
+            "modbus_task_delete_%1"
+        )
+        .arg(
+            reinterpret_cast<quintptr>(
+                this
+            )
+        );
+
+
+    QString taskName;
+    int pointCount = 0;
+    QString errorMessage;
+
+
+    // =====================================================
+    // 第一阶段：
+    // 查询任务名称和任务下面的点数
+    // =====================================================
+
+    {
+        QSqlDatabase db =
+            QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"),
+                connectionName
+            );
+
+        db.setDatabaseName(
+            modbusConfigDatabase_
+        );
+
+
+        if (!db.open())
+        {
+            errorMessage =
+                db.lastError().text();
+        }
+        else
+        {
+            // -------------------------------------------------
+            // 查询任务
+            // -------------------------------------------------
+
+            QSqlQuery taskQuery(db);
+
+            taskQuery.prepare(
+                QStringLiteral(
+                    "SELECT name "
+                    "FROM modbus_tasks "
+                    "WHERE id = ?"
+                )
+            );
+
+            taskQuery.addBindValue(
+                taskId
+            );
+
+
+            if (
+                !taskQuery.exec()
+                ||
+                !taskQuery.next()
+            )
+            {
+                errorMessage =
+                    QStringLiteral(
+                        "找不到要删除的 Modbus 任务。"
+                    );
+
+                if (
+                    taskQuery.lastError().isValid()
+                )
+                {
+                    errorMessage +=
+                        QStringLiteral(
+                            "\n%1"
+                        )
+                        .arg(
+                            taskQuery
+                            .lastError()
+                            .text()
+                        );
+                }
+            }
+            else
+            {
+                taskName =
+                    taskQuery
+                    .value(0)
+                    .toString();
+
+
+                // ---------------------------------------------
+                // 统计该任务下面的点
+                // ---------------------------------------------
+
+                QSqlQuery countQuery(db);
+
+                countQuery.prepare(
+                    QStringLiteral(
+                        "SELECT COUNT(*) "
+                        "FROM modbus_points "
+                        "WHERE task_id = ?"
+                    )
+                );
+
+                countQuery.addBindValue(
+                    taskId
+                );
+
+
+                if (
+                    countQuery.exec()
+                    &&
+                    countQuery.next()
+                )
+                {
+                    pointCount =
+                        countQuery
+                        .value(0)
+                        .toInt();
+                }
+                else
+                {
+                    errorMessage =
+                        QStringLiteral(
+                            "统计任务点数失败：\n%1"
+                        )
+                        .arg(
+                            countQuery
+                            .lastError()
+                            .text()
+                        );
+                }
+            }
+
+
+            db.close();
+        }
+    }
+
+
+    QSqlDatabase::removeDatabase(
+        connectionName
+    );
+
+
+    if (!errorMessage.isEmpty())
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "删除 Modbus 任务"
+            ),
+            errorMessage
+        );
+
+        return;
+    }
+
+
+    // =====================================================
+    // 第二阶段：
+    // 让用户确认
+    // =====================================================
+
+    QString confirmText;
+
+
+    if (pointCount > 0)
+    {
+        confirmText =
+            QStringLiteral(
+                "确定删除 Modbus 任务“%1”吗？\n\n"
+                "该任务下面还有 %2 个 Modbus 点。\n"
+                "继续删除将同时永久删除这些点。\n\n"
+                "此操作无法撤销。"
+            )
+            .arg(taskName)
+            .arg(pointCount);
+    }
+    else
+    {
+        confirmText =
+            QStringLiteral(
+                "确定删除 Modbus 任务“%1”吗？\n\n"
+                "该任务当前没有 Modbus 点。\n\n"
+                "此操作无法撤销。"
+            )
+            .arg(taskName);
+    }
+
+
+    const QMessageBox::StandardButton answer =
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "确认删除 Modbus 任务"
+            ),
+            confirmText,
+            QMessageBox::Yes
+            |
+            QMessageBox::No,
+            QMessageBox::No
+        );
+
+
+    if (
+        answer
+        !=
+        QMessageBox::Yes
+    )
+    {
+        return;
+    }
+
+
+    // =====================================================
+    // 第三阶段：
+    // transaction 中执行真正删除
+    //
+    // 1. DELETE modbus_points
+    // 2. DELETE modbus_tasks
+    // 3. COMMIT
+    //
+    // 任一步失败全部 ROLLBACK
+    // =====================================================
+
+    const QString deleteConnectionName =
+        QStringLiteral(
+            "modbus_task_delete_exec_%1"
+        )
+        .arg(
+            reinterpret_cast<quintptr>(
+                this
+            )
+        );
+
+
+    bool success = false;
+    QString deleteError;
+
+
+    {
+        QSqlDatabase db =
+            QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"),
+                deleteConnectionName
+            );
+
+        db.setDatabaseName(
+            modbusConfigDatabase_
+        );
+
+
+        if (!db.open())
+        {
+            deleteError =
+                db.lastError().text();
+        }
+        else if (!db.transaction())
+        {
+            deleteError =
+                QStringLiteral(
+                    "无法启动数据库事务：\n%1"
+                )
+                .arg(
+                    db.lastError().text()
+                );
+        }
+        else
+        {
+            bool transactionOk = true;
+
+
+            // -------------------------------------------------
+            // 先删除这个任务下面所有点
+            // -------------------------------------------------
+
+            QSqlQuery deletePointsQuery(db);
+
+            deletePointsQuery.prepare(
+                QStringLiteral(
+                    "DELETE FROM modbus_points "
+                    "WHERE task_id = ?"
+                )
+            );
+
+            deletePointsQuery.addBindValue(
+                taskId
+            );
+
+
+            if (!deletePointsQuery.exec())
+            {
+                transactionOk = false;
+
+                deleteError =
+                    QStringLiteral(
+                        "删除任务下的 Modbus 点失败：\n%1"
+                    )
+                    .arg(
+                        deletePointsQuery
+                        .lastError()
+                        .text()
+                    );
+            }
+
+
+            // -------------------------------------------------
+            // 再删除任务本身
+            // -------------------------------------------------
+
+            if (transactionOk)
+            {
+                QSqlQuery deleteTaskQuery(db);
+
+                deleteTaskQuery.prepare(
+                    QStringLiteral(
+                        "DELETE FROM modbus_tasks "
+                        "WHERE id = ?"
+                    )
+                );
+
+                deleteTaskQuery.addBindValue(
+                    taskId
+                );
+
+
+                if (!deleteTaskQuery.exec())
+                {
+                    transactionOk = false;
+
+                    deleteError =
+                        QStringLiteral(
+                            "删除 Modbus 任务失败：\n%1"
+                        )
+                        .arg(
+                            deleteTaskQuery
+                            .lastError()
+                            .text()
+                        );
+                }
+                else if (
+                    deleteTaskQuery.numRowsAffected()
+                    !=
+                    1
+                )
+                {
+                    transactionOk = false;
+
+                    deleteError =
+                        QStringLiteral(
+                            "删除 Modbus 任务失败："
+                            "数据库中没有找到对应任务。"
+                        );
+                }
+            }
+
+
+            // -------------------------------------------------
+            // COMMIT / ROLLBACK
+            // -------------------------------------------------
+
+            if (transactionOk)
+            {
+                if (db.commit())
+                {
+                    success = true;
+                }
+                else
+                {
+                    deleteError =
+                        QStringLiteral(
+                            "提交删除事务失败：\n%1"
+                        )
+                        .arg(
+                            db.lastError().text()
+                        );
+
+                    db.rollback();
+                }
+            }
+            else
+            {
+                db.rollback();
+            }
+
+
+            db.close();
+        }
+    }
+
+
+    QSqlDatabase::removeDatabase(
+        deleteConnectionName
+    );
+
+
+    // =====================================================
+    // 删除失败
+    // =====================================================
+
+    if (!success)
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral(
+                "删除 Modbus 任务"
+            ),
+            deleteError
+        );
+
+        return;
+    }
+
+
+    // =====================================================
+    // 如果删掉的正好是当前任务
+    // 清除当前任务选择
+    // =====================================================
+
+    if (
+        currentModbusTaskId_
+        ==
+        taskId
+    )
+    {
+        currentModbusTaskId_ =
+            -1;
+
+
+        // 清空当前点表
+        if (modbusPointsTable_)
+        {
+            modbusPointsTable_
+                ->setRowCount(0);
+        }
+
+
+        // 清空右侧任务属性
+        if (modbusTaskNameEdit_)
+            modbusTaskNameEdit_->clear();
+
+        if (modbusTaskHostEdit_)
+            modbusTaskHostEdit_->clear();
+
+        if (modbusTaskPortEdit_)
+            modbusTaskPortEdit_->clear();
+
+        if (modbusTaskSlaveEdit_)
+            modbusTaskSlaveEdit_->clear();
+
+        if (modbusTaskPeriodEdit_)
+            modbusTaskPeriodEdit_->clear();
+
+        if (modbusTaskTimeoutEdit_)
+            modbusTaskTimeoutEdit_->clear();
+
+        if (modbusTaskRetryEdit_)
+            modbusTaskRetryEdit_->clear();
+
+        if (modbusTaskReconnectEdit_)
+            modbusTaskReconnectEdit_->clear();
+    }
+
+
+    // =====================================================
+    // 重建左侧工程树
+    // =====================================================
+
+    rebuildProjectTree();
+
+
+    statusBar()->showMessage(
+        QStringLiteral(
+            "已删除 Modbus 任务“%1”，"
+            "同时删除 %2 个 Modbus 点。"
+        )
+        .arg(taskName)
+        .arg(pointCount),
+        3500
+    );
+}
+
+void loadModbusPointsTable()
+{
+    if (!modbusPointsTable_)
+        return;
+
+    modbusPointsTable_->setRowCount(0);
+
+    const QString connectionName =
+        QStringLiteral("modbus_points_%1")
+        .arg(reinterpret_cast<quintptr>(this));
+
+    {
+        QSqlDatabase db =
+            QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"),
+                connectionName
+            );
+
+        db.setDatabaseName(
+            modbusConfigDatabase_
+        );
+
+        // =====================================================
+        // 打开数据库
+        // =====================================================
+
+        if (!db.open())
+        {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("Modbus 点表"),
+                QStringLiteral(
+                    "无法打开 Modbus 配置数据库：\n%1\n\n%2"
+                )
+                .arg(
+                    modbusConfigDatabase_,
+                    db.lastError().text()
+                )
+            );
+
+            return;
+        }
+
+
+        // =====================================================
+        // 查询 modbus_points
+        // =====================================================
+
+        QSqlQuery query(db);
+
+// =====================================================
+// 检查 modbus_points 是否已经存在 direction 字段
+// =====================================================
+
+bool hasDirectionColumn = false;
+
+if (
+    query.exec(
+        QStringLiteral(
+            "PRAGMA table_info(modbus_points)"
+        )
+    )
+)
+{
+    while (query.next())
+    {
+        // PRAGMA table_info 返回的第 2 列是字段名
+        if (
+            query.value(1).toString()
+            ==
+            QStringLiteral("direction")
+        )
+        {
+            hasDirectionColumn = true;
+            break;
+        }
+    }
+}
+
+
+// =====================================================
+// 老数据库没有 direction 时自动增加
+// =====================================================
+
+if (!hasDirectionColumn)
+{
+    if (
+        !query.exec(
+            QStringLiteral(
+                "ALTER TABLE modbus_points "
+                "ADD COLUMN direction TEXT "
+                "DEFAULT 'INPUT'"
+            )
+        )
+    )
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Modbus 点表"),
+            QStringLiteral(
+                "增加 direction 字段失败：\n%1"
+            )
+            .arg(
+                query.lastError().text()
+            )
+        );
+
+        db.close();
+        return;
+    }
+}
+
+// =====================================================
+// Modbus 多任务数据库升级
+//
+// 新结构：
+// modbus_tasks  -> 保存一个 Modbus 采集任务的公共配置
+// modbus_points -> 通过 task_id 归属某个任务
+//
+// 当前阶段只做数据库兼容升级，暂时不修改现有 UI。
+// =====================================================
+
+
+// =====================================================
+// 1. 创建 modbus_tasks 表
+// =====================================================
+
+if (
+    !query.exec(
+        QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS modbus_tasks "
+            "("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "name TEXT NOT NULL, "
+            "host TEXT NOT NULL DEFAULT '127.0.0.1', "
+            "port INTEGER NOT NULL DEFAULT 502, "
+            "slave_id INTEGER NOT NULL DEFAULT 1, "
+            "period INTEGER NOT NULL DEFAULT 1000, "
+            "timeout INTEGER NOT NULL DEFAULT 1000, "
+            "retry_count INTEGER NOT NULL DEFAULT 2, "
+            "reconnect_interval INTEGER NOT NULL DEFAULT 3000, "
+            "enable INTEGER NOT NULL DEFAULT 1"
+            ")"
+        )
+    )
+)
+{
+    QMessageBox::warning(
+        this,
+        QStringLiteral("Modbus 点表"),
+        QStringLiteral(
+            "创建 modbus_tasks 表失败：\n%1"
+        )
+        .arg(
+            query.lastError().text()
+        )
+    );
+
+    db.close();
+    return;
+}
+
+
+// =====================================================
+// 2. 检查 modbus_points 是否已经有 task_id
+// =====================================================
+
+bool hasTaskIdColumn = false;
+
+if (
+    query.exec(
+        QStringLiteral(
+            "PRAGMA table_info(modbus_points)"
+        )
+    )
+)
+{
+    while (query.next())
+    {
+        if (
+            query.value(1).toString()
+            ==
+            QStringLiteral("task_id")
+        )
+        {
+            hasTaskIdColumn = true;
+            break;
+        }
+    }
+}
+
+
+// =====================================================
+// 3. 老数据库没有 task_id 时自动增加
+// =====================================================
+
+if (!hasTaskIdColumn)
+{
+    if (
+        !query.exec(
+            QStringLiteral(
+                "ALTER TABLE modbus_points "
+                "ADD COLUMN task_id INTEGER"
+            )
+        )
+    )
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Modbus 点表"),
+            QStringLiteral(
+                "增加 task_id 字段失败：\n%1"
+            )
+            .arg(
+                query.lastError().text()
+            )
+        );
+
+        db.close();
+        return;
+    }
+}
+
+
+// =====================================================
+// 4. 检查是否已经存在 Modbus 采集任务
+// =====================================================
+
+int defaultTaskId = -1;
+
+if (
+    query.exec(
+        QStringLiteral(
+            "SELECT id "
+            "FROM modbus_tasks "
+            "ORDER BY id "
+            "LIMIT 1"
+        )
+    )
+    &&
+    query.next()
+)
+{
+    defaultTaskId =
+        query.value(0).toInt();
+}
+
+
+// =====================================================
+// 5. 第一次升级时创建默认任务
+//
+// 先让现在所有已有点都归到 Modbus任务1。
+// =====================================================
+
+if (defaultTaskId < 0)
+{
+    QSqlQuery insertTaskQuery(db);
+
+    insertTaskQuery.prepare(
+        QStringLiteral(
+            "INSERT INTO modbus_tasks "
+            "("
+            "name, "
+            "host, "
+            "port, "
+            "slave_id, "
+            "period, "
+            "timeout, "
+            "retry_count, "
+            "reconnect_interval, "
+            "enable"
+            ") "
+            "VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+    );
+
+    insertTaskQuery.addBindValue(
+        QStringLiteral("Modbus任务1")
+    );
+
+    insertTaskQuery.addBindValue(
+        QStringLiteral("127.0.0.1")
+    );
+
+    insertTaskQuery.addBindValue(502);
+    insertTaskQuery.addBindValue(1);
+
+    // 整个任务统一采集周期
+    insertTaskQuery.addBindValue(1000);
+
+    insertTaskQuery.addBindValue(1000);
+    insertTaskQuery.addBindValue(2);
+    insertTaskQuery.addBindValue(3000);
+    insertTaskQuery.addBindValue(1);
+
+    if (!insertTaskQuery.exec())
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Modbus 点表"),
+            QStringLiteral(
+                "创建默认 Modbus 任务失败：\n%1"
+            )
+            .arg(
+                insertTaskQuery
+                .lastError()
+                .text()
+            )
+        );
+
+        db.close();
+        return;
+    }
+
+    defaultTaskId =
+        insertTaskQuery
+        .lastInsertId()
+        .toInt();
+}
+
+
+// =====================================================
+// 6. 将现有旧点全部归入默认任务
+//
+// 只处理还没有 task_id 的点。
+// 不会覆盖以后已经分配到任务2、任务3的点。
+// =====================================================
+
+QSqlQuery assignTaskQuery(db);
+
+assignTaskQuery.prepare(
+    QStringLiteral(
+        "UPDATE modbus_points "
+        "SET task_id = ? "
+        "WHERE task_id IS NULL "
+        "OR task_id <= 0"
+    )
+);
+
+assignTaskQuery.addBindValue(
+    defaultTaskId
+);
+
+if (!assignTaskQuery.exec())
+{
+    QMessageBox::warning(
+        this,
+        QStringLiteral("Modbus 点表"),
+        QStringLiteral(
+            "迁移现有 Modbus 点到默认任务失败：\n%1"
+        )
+        .arg(
+            assignTaskQuery
+            .lastError()
+            .text()
+        )
+    );
+
+    db.close();
+    return;
+}
+
+        query.prepare(
+    QStringLiteral(
+        "SELECT "
+        "id, "
+        "name, "
+        "slave_id, "
+        "function, "
+        "address, "
+        "datatype, "
+        "period, "
+        "enable, "
+        "byte_order, "
+        "direction "
+        "FROM modbus_points "
+        "WHERE task_id = ? "
+        "ORDER BY id"
+    )
+);
+
+query.addBindValue(
+    currentModbusTaskId_
+);
+
+if (!query.exec())
+        {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("Modbus 点表"),
+                QStringLiteral(
+                    "读取 modbus_points 失败：\n%1"
+                )
+                .arg(
+                    query.lastError().text()
+                )
+            );
+
+            db.close();
+            return;
+        }
+
+
+        // =====================================================
+        // 一行一行读取
+        // =====================================================
+
+        while (query.next())
+        {
+            const int id =
+                query.value(0).toInt();
+
+            const QString name =
+                query.value(1).toString();
+
+            const int slaveId =
+                query.value(2).toInt();
+
+            const int function =
+                query.value(3).toInt();
+
+            const int rawAddress =
+                query.value(4).toInt();
+
+            const QString datatype =
+                query.value(5).toString();
+
+            const int period =
+                query.value(6).toInt();
+
+            QString byteOrder =
+                query.value(8).toString();
+
+            if (byteOrder.isEmpty())
+            {
+                byteOrder =
+                    QStringLiteral("ABCD");
+            }
+
+            QString direction =
+                query.value(9).toString();
+
+            if (
+                direction != QStringLiteral("INPUT")
+                &&
+                direction != QStringLiteral("OUTPUT")
+            )
+            {
+                direction =
+                    QStringLiteral("INPUT");
+            }
+
+            // =================================================
+            // 数据库原始地址 -> 界面 Modbus 地址
+            //
+            // 例如：
+            //
+            // function=3,address=0
+            //       ↓
+            //     40001
+            // =================================================
+
+            QString modbusAddress;
+
+            if (
+                function == 1
+                ||
+                function == 5
+                ||
+                function == 15
+            )
+            {
+                modbusAddress =
+                    QStringLiteral("%1")
+                    .arg(
+                        rawAddress + 1,
+                        5,
+                        10,
+                        QChar('0')
+                    );
+            }
+            else if (function == 2)
+            {
+                modbusAddress =
+                    QString::number(
+                        10001 + rawAddress
+                    );
+            }
+            else if (
+                function == 3
+                ||
+                function == 6
+                ||
+                function == 16
+            )
+            {
+                modbusAddress =
+                    QString::number(
+                        40001 + rawAddress
+                    );
+            }
+            else if (function == 4)
+            {
+                modbusAddress =
+                    QString::number(
+                        30001 + rawAddress
+                    );
+            }
+            else
+            {
+                modbusAddress =
+                    QString::number(
+                        rawAddress
+                    );
+            }
+
+
+            // =================================================
+            // 插入新行
+            // =================================================
+
+            const int row =
+                modbusPointsTable_->rowCount();
+
+            modbusPointsTable_->insertRow(row);
+
+
+            // =================================================
+            // 第0列：点名
+            //
+            // 顺便把数据库里的隐藏信息保存到 UserRole
+            // 后面“修改/删除/保存”会使用
+            // =================================================
+
+            auto *nameItem =
+                new QTableWidgetItem(name);
+
+            // 数据库 id
+            nameItem->setData(
+                Qt::UserRole,
+                id
+            );
+
+            // Slave ID
+            nameItem->setData(
+                Qt::UserRole + 1,
+                slaveId
+            );
+
+            // function
+            nameItem->setData(
+                Qt::UserRole + 2,
+                function
+            );
+
+            // 原始 address
+            nameItem->setData(
+                Qt::UserRole + 3,
+                rawAddress
+            );
+
+            modbusPointsTable_->setItem(
+                row,
+                0,
+                nameItem
+            );
+
+
+            // =================================================
+            // 第1列：Modbus 地址
+            // =================================================
+
+            auto *addressItem = new QTableWidgetItem(modbusAddress);
+            addressItem->setToolTip(
+                QStringLiteral("双击可自定义 Modbus 地址"));
+            modbusPointsTable_->setItem(row, 1, addressItem);
+
+
+            // =================================================
+            // 第2列：读写方向
+            // =================================================
+
+            auto *directionCombo =
+                new QComboBox;
+
+            directionCombo->addItems({
+                QStringLiteral("INPUT"),
+                QStringLiteral("OUTPUT")
+            });
+
+            directionCombo->setCurrentText(
+                direction
+            );
+
+            modbusPointsTable_->setCellWidget(
+                row,
+                2,
+                directionCombo
+            );
+
+
+            // =================================================
+            // 第3列：数据类型
+            // =================================================
+
+            auto *datatypeCombo =
+                new QComboBox;
+
+            datatypeCombo->addItems({
+                QStringLiteral("INT16"),
+                QStringLiteral("UINT16"),
+                QStringLiteral("INT32"),
+                QStringLiteral("UINT32"),
+                QStringLiteral("FLOAT"),
+                QStringLiteral("DOUBLE")
+            });
+
+            datatypeCombo->setCurrentText(
+                datatype
+            );
+
+            modbusPointsTable_->setCellWidget(
+                row,
+                3,
+                datatypeCombo
+            );
+
+
+            // =================================================
+            // 第4列：大小端转换
+            // =================================================
+
+            auto *byteOrderCombo =
+                new QComboBox;
+
+            byteOrderCombo->addItems({
+                QStringLiteral("ABCD"),
+                QStringLiteral("BADC"),
+                QStringLiteral("CDAB"),
+                QStringLiteral("DCBA")
+            });
+
+            byteOrderCombo->setCurrentText(
+                byteOrder
+            );
+
+            modbusPointsTable_->setCellWidget(
+                row,
+                4,
+                byteOrderCombo
+            );
+
+
+        }
+
+
+        db.close();
+    }
+
+
+        QSqlDatabase::removeDatabase(
+        connectionName
+    );
+}
+
+
+// =============================================================
+// 保存 Modbus 点表
+//
+// 当前阶段：
+// 1. 已有数据库点 -> UPDATE
+// 2. 新建点       -> INSERT
+//
+// 暂时不处理已经从 UI 删除的点
+// =============================================================
+
+void saveModbusPointsTable()
+{
+    if (!modbusPointsTable_)
+        return;
+
+    const QString connectionName =
+        QStringLiteral("modbus_points_save_%1")
+        .arg(
+            reinterpret_cast<quintptr>(this)
+        );
+
+    bool success = true;
+    QString errorMessage;
+
+
+    // =========================================================
+    // 使用独立作用域，确保 removeDatabase 前释放 db/query
+    // =========================================================
+
+    {
+        QSqlDatabase db =
+            QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"),
+                connectionName
+            );
+
+        db.setDatabaseName(
+            modbusConfigDatabase_
+        );
+
+
+        // =====================================================
+        // 打开数据库
+        // =====================================================
+
+        if (!db.open())
+        {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("保存 Modbus 点表"),
+                QStringLiteral(
+                    "无法打开 Modbus 配置数据库：\n%1\n\n%2"
+                )
+                .arg(
+                    modbusConfigDatabase_,
+                    db.lastError().text()
+                )
+            );
+
+            return;
+        }
+
+
+        // =====================================================
+        // 开启事务
+        //
+        // 如果中间某个点保存失败，就全部撤销
+        // =====================================================
+
+        if (!db.transaction())
+        {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("保存 Modbus 点表"),
+                QStringLiteral(
+                    "无法启动数据库事务：\n%1"
+                )
+                .arg(
+                    db.lastError().text()
+                )
+            );
+
+            db.close();
+            return;
+        }
+
+// =====================================================
+// 获取当前 Modbus 任务的统一采集周期
+//
+// 当前 Collector 仍然读取 modbus_points.period，
+// 所以过渡阶段保存点时，将任务周期同步写入旧 period 字段。
+// 后续 Collector 改为直接读取 modbus_tasks.period 后，
+// 这里即可删除。
+// =====================================================
+
+int taskPeriod = 1000;
+
+{
+    QSqlQuery taskQuery(db);
+
+    taskQuery.prepare(
+        QStringLiteral(
+            "SELECT period "
+            "FROM modbus_tasks "
+            "WHERE id = ?"
+        )
+    );
+
+    taskQuery.addBindValue(
+        currentModbusTaskId_
+    );
+
+    if (
+        taskQuery.exec()
+        &&
+        taskQuery.next()
+    )
+    {
+        taskPeriod =
+            taskQuery.value(0).toInt();
+    }
+}
+
+if (taskPeriod <= 0)
+{
+    taskPeriod = 1000;
+}
+
+        // =====================================================
+        // 一行一行读取 Qt 点表
+        // =====================================================
+
+        for (
+            int row = 0;
+            row < modbusPointsTable_->rowCount();
+            ++row
+        )
+        {
+            // -------------------------------------------------
+            // 获取普通单元格
+            // -------------------------------------------------
+
+            QTableWidgetItem *nameItem =
+                modbusPointsTable_->item(
+                    row,
+                    0
+                );
+
+            QTableWidgetItem *addressItem =
+                modbusPointsTable_->item(
+                    row,
+                    1
+                );
+
+            // -------------------------------------------------
+            // 获取三个下拉框
+            // -------------------------------------------------
+
+            auto *directionCombo =
+                qobject_cast<QComboBox *>(
+                    modbusPointsTable_->cellWidget(
+                        row,
+                        2
+                    )
+                );
+
+            auto *datatypeCombo =
+                qobject_cast<QComboBox *>(
+                    modbusPointsTable_->cellWidget(
+                        row,
+                        3
+                    )
+                );
+
+            auto *byteOrderCombo =
+                qobject_cast<QComboBox *>(
+                    modbusPointsTable_->cellWidget(
+                        row,
+                        4
+                    )
+                );
+
+
+            // =================================================
+            // 检查这一行是否完整
+            // =================================================
+
+            if (
+                !nameItem
+                ||
+                !addressItem
+                ||
+                !directionCombo
+                ||
+                !datatypeCombo
+                ||
+                !byteOrderCombo
+            )
+            {
+                success = false;
+
+                errorMessage =
+                    QStringLiteral(
+                        "第 %1 行的数据不完整。"
+                    )
+                    .arg(row + 1);
+
+                break;
+            }
+
+
+            // =================================================
+            // 点名
+            // =================================================
+
+            const QString name =
+                nameItem->text().trimmed();
+
+            if (name.isEmpty())
+            {
+                success = false;
+
+                errorMessage =
+                    QStringLiteral(
+                        "第 %1 行的点名不能为空。"
+                    )
+                    .arg(row + 1);
+
+                break;
+            }
+
+
+            // =================================================
+            // 界面 Modbus 地址
+            // =================================================
+
+            bool addressOk = false;
+
+            const int modbusAddress =
+                addressItem
+                ->text()
+                .trimmed()
+                .toInt(
+                    &addressOk
+                );
+
+            if (!addressOk)
+            {
+                success = false;
+
+                errorMessage =
+                    QStringLiteral(
+                        "点“%1”的 Modbus 地址无效。"
+                    )
+                    .arg(name);
+
+                break;
+            }
+
+
+            // =================================================
+            // 界面地址 -> function + 数据库原始 address
+            //
+            // 00001~09999 -> FC01
+            // 10001~19999 -> FC02
+            // 30001~39999 -> FC04
+            // 40001~49999 -> FC03
+            //
+            // 例如：
+            // 40001 -> function=3,address=0
+            // 40010 -> function=3,address=9
+            // =================================================
+
+            int function = 0;
+            int rawAddress = -1;
+
+            if (
+                modbusAddress >= 1
+                &&
+                modbusAddress <= 9999
+            )
+            {
+                function = 1;
+                rawAddress =
+                    modbusAddress - 1;
+            }
+            else if (
+                modbusAddress >= 10001
+                &&
+                modbusAddress <= 19999
+            )
+            {
+                function = 2;
+                rawAddress =
+                    modbusAddress - 10001;
+            }
+            else if (
+                modbusAddress >= 30001
+                &&
+                modbusAddress <= 39999
+            )
+            {
+                function = 4;
+                rawAddress =
+                    modbusAddress - 30001;
+            }
+            else if (
+                modbusAddress >= 40001
+                &&
+                modbusAddress <= 49999
+            )
+            {
+                function = 3;
+                rawAddress =
+                    modbusAddress - 40001;
+            }
+            else
+            {
+                success = false;
+
+                errorMessage =
+                    QStringLiteral(
+                        "点“%1”的 Modbus 地址 %2 "
+                        "不在当前支持的地址范围内。"
+                    )
+                    .arg(name)
+                    .arg(modbusAddress);
+
+                break;
+            }
+
+
+            // =================================================
+            // 下拉框配置
+            // =================================================
+
+            const QString direction =
+                directionCombo->currentText();
+
+            const QString datatype =
+                datatypeCombo->currentText();
+
+            const QString byteOrder =
+                byteOrderCombo->currentText();
+
+            if (
+                direction == QStringLiteral("OUTPUT")
+                &&
+                (modbusAddress < 40001 || modbusAddress > 49999)
+            )
+            {
+                success = false;
+                errorMessage = QStringLiteral(
+                    "点“%1”是 OUTPUT，必须配置在可写的"
+                    "保持寄存器地址 40001~49999。")
+                    .arg(name);
+                break;
+            }
+
+
+            // 点表不再提供单点启停，所有保存的点默认启用。
+            const int enabled = 1;
+
+
+            // =================================================
+            // Slave ID
+            //
+            // 已有点：
+            // loadModbusPointsTable() 已经放在 UserRole+1
+            //
+            // 新建点：
+            // 我们之前默认放的是 1
+            // =================================================
+
+            int slaveId =
+                nameItem
+                ->data(
+                    Qt::UserRole + 1
+                )
+                .toInt();
+
+            if (
+                slaveId < 1
+                ||
+                slaveId > 247
+            )
+            {
+                slaveId = 1;
+            }
+
+
+            // =================================================
+            // 获取数据库 ID
+            //
+            // 已有点：真实 id
+            // 新建点：-1
+            // =================================================
+
+            const int id =
+                nameItem
+                ->data(
+                    Qt::UserRole
+                )
+                .toInt();
+
+
+            // =================================================
+            // 已有点 -> UPDATE
+            // =================================================
+
+            if (id >= 0)
+            {
+                QSqlQuery updateQuery(db);
+
+                updateQuery.prepare(
+                    QStringLiteral(
+                        "UPDATE modbus_points "
+                        "SET "
+                        "name = ?, "
+                        "slave_id = ?, "
+                        "function = ?, "
+                        "address = ?, "
+                        "datatype = ?, "
+                        "period = ?, "
+                        "enable = ?, "
+                        "byte_order = ?, "
+                        "direction = ? "
+                        "WHERE id = ? "
+                        "AND task_id = ?"
+                    )
+                );
+
+                updateQuery.addBindValue(name);
+                updateQuery.addBindValue(slaveId);
+                updateQuery.addBindValue(function);
+                updateQuery.addBindValue(rawAddress);
+                updateQuery.addBindValue(datatype);
+                updateQuery.addBindValue(taskPeriod);
+                updateQuery.addBindValue(enabled);
+                updateQuery.addBindValue(byteOrder);
+                updateQuery.addBindValue(direction);
+                updateQuery.addBindValue(id);
+                updateQuery.addBindValue(currentModbusTaskId_);
+
+                if (!updateQuery.exec())
+                {
+                    success = false;
+
+                    errorMessage =
+                        QStringLiteral(
+                            "修改点“%1”失败：\n%2"
+                        )
+                        .arg(
+                            name,
+                            updateQuery
+                            .lastError()
+                            .text()
+                        );
+
+                    break;
+                }
+            }
+
+
+            // =================================================
+            // 新建点 -> INSERT
+            // =================================================
+
+            else
+            {
+                QSqlQuery insertQuery(db);
+
+                insertQuery.prepare(
+                    QStringLiteral(
+                        "INSERT INTO modbus_points "
+                        "("
+                        "name, "
+                        "slave_id, "
+                        "function, "
+                        "address, "
+                        "datatype, "
+                        "period, "
+                        "enable, "
+                        "byte_order, "
+                        "direction, "
+                        "task_id"
+                        ") "
+                        "VALUES "
+                        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    )
+                );
+
+                insertQuery.addBindValue(name);
+                insertQuery.addBindValue(slaveId);
+                insertQuery.addBindValue(function);
+                insertQuery.addBindValue(rawAddress);
+                insertQuery.addBindValue(datatype);
+                insertQuery.addBindValue(taskPeriod);
+                insertQuery.addBindValue(enabled);
+                insertQuery.addBindValue(byteOrder);
+                insertQuery.addBindValue(direction);
+                insertQuery.addBindValue(currentModbusTaskId_);
+
+                if (!insertQuery.exec())
+                {
+                    success = false;
+
+                    errorMessage =
+                        QStringLiteral(
+                            "新建点“%1”失败：\n%2"
+                        )
+                        .arg(
+                            name,
+                            insertQuery
+                            .lastError()
+                            .text()
+                        );
+
+                    break;
+                }
+
+
+                // ---------------------------------------------
+                // SQLite 自动生成了新的 id
+                // 把它写回 UI，防止下一次保存再次 INSERT
+                // ---------------------------------------------
+
+                const int newId =
+                    insertQuery
+                    .lastInsertId()
+                    .toInt();
+
+                nameItem->setData(
+                    Qt::UserRole,
+                    newId
+                );
+
+                nameItem->setData(
+                    Qt::UserRole + 2,
+                    function
+                );
+
+                nameItem->setData(
+                    Qt::UserRole + 3,
+                    rawAddress
+                );
+            }
+        }
+
+
+        // =====================================================
+        // 所有点都成功 -> COMMIT
+        // 任意一点失败 -> ROLLBACK
+        // =====================================================
+
+        if (success)
+        {
+            if (!db.commit())
+            {
+                success = false;
+
+                errorMessage =
+                    QStringLiteral(
+                        "提交数据库事务失败：\n%1"
+                    )
+                    .arg(
+                        db.lastError().text()
+                    );
+
+                db.rollback();
+            }
+        }
+        else
+        {
+            db.rollback();
+        }
+
+
+        db.close();
+    }
+
+
+    QSqlDatabase::removeDatabase(
+        connectionName
+    );
+
+
+    // =========================================================
+    // 显示保存结果
+    // =========================================================
+
+    if (!success)
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("保存 Modbus 点表"),
+            errorMessage
+        );
+
+        return;
+    }
+
+
+    statusBar()->showMessage(
+        QStringLiteral(
+            "Modbus 点表保存成功。"
+        ),
+        3000
+    );
+}
 
     QWidget *createOverviewPage()
     {
@@ -299,6 +4571,38 @@ private:
         overview_->horizontalHeader()->setStretchLastSection(true);
         overview_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
         layout->addWidget(overview_);
+
+        // =========================================================
+        // Modbus 工程：创建 Modbus TCP 通信总览行
+        // =========================================================
+
+        if (currentCommunicationType_ == QStringLiteral("modbus"))
+        {
+            overview_->insertRow(0);
+
+            const QStringList values = {
+                QStringLiteral("○ 待检测"),
+                QStringLiteral("Modbus 通信"),
+                QStringLiteral("Modbus TCP / 主站"),
+                QStringLiteral("127.0.0.1:502"),
+                QStringLiteral("0 / 0"),
+                QStringLiteral("--"),
+                QStringLiteral("待启动")
+            };
+
+            for (int column = 0; column < values.size(); ++column)
+            {
+                overview_->setItem(
+                    0,
+                    column,
+                    new QTableWidgetItem(values[column])
+                );
+            }
+
+            overview_->item(0, 0)->setForeground(
+                QColor("#808000")
+            );
+        }
 
         auto *summary = new QHBoxLayout;
         for (const auto &pair : QList<QPair<QString, QString>>{
@@ -375,7 +4679,9 @@ private:
         auto *clear = new QPushButton(QStringLiteral("清空"));
         bar->addWidget(pause);
         bar->addWidget(clear);
-        auto *source = new QLabel(QStringLiteral("监视来源：Python Runner 标准输出 / 错误输出"));
+        auto *source = new QLabel(
+            QStringLiteral("监视来源：Python Runner / Modbus TCP")
+        );
         source->setStyleSheet(QStringLiteral("color:#000080;"));
         bar->addWidget(source);
         bar->addStretch();
@@ -386,8 +4692,12 @@ private:
         auto *split = new QSplitter(Qt::Vertical);
         frames_ = new QTableWidget(0, 6);
         frames_->setHorizontalHeaderLabels({
-            QStringLiteral("时间"), QStringLiteral("来源"), QStringLiteral("脚本任务"),
-            QStringLiteral("摘要"), QStringLiteral("长度"), QStringLiteral("结果")
+            QStringLiteral("时间"),
+            QStringLiteral("来源"),
+            QStringLiteral("任务 / 点名"),
+            QStringLiteral("报文 / 内容"),
+            QStringLiteral("长度"),
+            QStringLiteral("方向 / 结果")
         });
         frames_->setAlternatingRowColors(true);
         frames_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -402,14 +4712,20 @@ private:
         frameDetail_ = new QPlainTextEdit;
         frameDetail_->setReadOnly(true);
         frameDetail_->setFont(QFont(QStringLiteral("Monaco"), 11));
-        frameDetail_->setPlaceholderText(QStringLiteral("选择一条 Python 输出后在这里显示完整内容。"));
+        frameDetail_->setPlaceholderText(
+            QStringLiteral("选择一条记录后在这里显示完整内容。")
+        );
         detailLayout->addWidget(frameDetail_);
         split->addWidget(detailPanel);
         split->setSizes({300, 180});
         layout->addWidget(split);
         connect(clear, &QPushButton::clicked, frames_, [this] {
             frames_->setRowCount(0);
-            if (frameDetail_) frameDetail_->clear();
+
+            lastModbusFrameKeys_.clear();
+
+            if (frameDetail_)
+                frameDetail_->clear();
         });
         connect(pause, &QPushButton::clicked, pause, [this, pause] {
             framePaused_ = !framePaused_;
@@ -427,39 +4743,226 @@ private:
 
     QWidget *createPropertyPanel()
     {
-        auto *scroll = new QScrollArea;
-        scroll->setWidgetResizable(true);
-        auto *panel = new QWidget;
-        auto *layout = new QVBoxLayout(panel);
-        auto addForm = [&](const QString &title, const QList<QPair<QString, QString>> &items) {
-            auto *group = new QGroupBox(title);
-            auto *form = new QFormLayout(group);
-            form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-            for (const auto &item : items) {
-                auto *edit = new QLineEdit(item.second);
-                form->addRow(item.first, edit);
+        auto *scroll =
+            new QScrollArea;
+
+        scroll->setWidgetResizable(
+            true
+        );
+
+
+        auto *panel =
+            new QWidget;
+
+        auto *layout =
+            new QVBoxLayout(
+                panel
+            );
+
+
+        // =====================================================
+        // 基本
+        // =====================================================
+
+        auto *basicGroup =
+            new QGroupBox(
+                QStringLiteral("基本")
+            );
+
+        auto *basicForm =
+            new QFormLayout(
+                basicGroup
+            );
+
+        basicForm->setFieldGrowthPolicy(
+            QFormLayout::AllNonFixedFieldsGrow
+        );
+
+
+        modbusTaskNameEdit_ =
+            new QLineEdit;
+
+        modbusTaskProtocolEdit_ =
+            new QLineEdit(
+                QStringLiteral("Modbus TCP")
+            );
+
+        modbusTaskRoleEdit_ =
+            new QLineEdit(
+                QStringLiteral("主站")
+            );
+
+
+        // 协议和角色目前不允许修改
+        modbusTaskProtocolEdit_->setReadOnly(
+            true
+        );
+
+        modbusTaskRoleEdit_->setReadOnly(
+            true
+        );
+
+
+        basicForm->addRow(
+            QStringLiteral("任务名称"),
+            modbusTaskNameEdit_
+        );
+
+        basicForm->addRow(
+            QStringLiteral("协议"),
+            modbusTaskProtocolEdit_
+        );
+
+        basicForm->addRow(
+            QStringLiteral("角色"),
+            modbusTaskRoleEdit_
+        );
+
+
+        layout->addWidget(
+            basicGroup
+        );
+
+
+        // =====================================================
+        // 端点
+        // =====================================================
+
+        auto *endpointGroup =
+            new QGroupBox(
+                QStringLiteral("端点")
+            );
+
+        auto *endpointForm =
+            new QFormLayout(
+                endpointGroup
+            );
+
+        endpointForm->setFieldGrowthPolicy(
+            QFormLayout::AllNonFixedFieldsGrow
+        );
+
+
+        modbusTaskHostEdit_ =
+            new QLineEdit;
+
+        modbusTaskPortEdit_ =
+            new QLineEdit;
+
+        modbusTaskSlaveEdit_ =
+            new QLineEdit;
+
+
+        endpointForm->addRow(
+            QStringLiteral("IP 地址"),
+            modbusTaskHostEdit_
+        );
+
+        endpointForm->addRow(
+            QStringLiteral("端口"),
+            modbusTaskPortEdit_
+        );
+
+        endpointForm->addRow(
+            QStringLiteral("Unit ID"),
+            modbusTaskSlaveEdit_
+        );
+
+
+        layout->addWidget(
+            endpointGroup
+        );
+
+
+        // =====================================================
+        // 时序
+        // =====================================================
+
+        auto *timingGroup =
+            new QGroupBox(
+                QStringLiteral("时序")
+            );
+
+        auto *timingForm =
+            new QFormLayout(
+                timingGroup
+            );
+
+        timingForm->setFieldGrowthPolicy(
+            QFormLayout::AllNonFixedFieldsGrow
+        );
+
+
+        modbusTaskPeriodEdit_ =
+            new QLineEdit;
+
+        modbusTaskTimeoutEdit_ =
+            new QLineEdit;
+
+        modbusTaskRetryEdit_ =
+            new QLineEdit;
+
+        modbusTaskReconnectEdit_ =
+            new QLineEdit;
+
+
+        timingForm->addRow(
+            QStringLiteral("采集周期"),
+            modbusTaskPeriodEdit_
+        );
+
+        timingForm->addRow(
+            QStringLiteral("响应超时"),
+            modbusTaskTimeoutEdit_
+        );
+
+        timingForm->addRow(
+            QStringLiteral("重试次数"),
+            modbusTaskRetryEdit_
+        );
+
+        timingForm->addRow(
+            QStringLiteral("重连间隔"),
+            modbusTaskReconnectEdit_
+        );
+
+
+        layout->addWidget(
+            timingGroup
+        );
+
+
+        // =====================================================
+        // 保存按钮
+        // =====================================================
+
+        saveModbusTaskButton_ =
+            new QPushButton(
+                QStringLiteral("保存任务配置")
+            );
+
+        layout->addWidget(
+            saveModbusTaskButton_
+        );
+
+
+        connect(
+            saveModbusTaskButton_,
+            &QPushButton::clicked,
+            this,
+            [this]
+            {
+                saveCurrentModbusTask();
             }
-            layout->addWidget(group);
-        };
-        addForm(QStringLiteral("基本"), {
-            {QStringLiteral("通道名称"), QStringLiteral("锅炉房 PLC")},
-            {QStringLiteral("协议"), QStringLiteral("Modbus TCP")},
-            {QStringLiteral("角色"), QStringLiteral("主站")}
-        });
-        addForm(QStringLiteral("端点"), {
-            {QStringLiteral("IP 地址"), QStringLiteral("10.20.1.31")},
-            {QStringLiteral("端口"), QStringLiteral("502")},
-            {QStringLiteral("Unit ID"), QStringLiteral("1")}
-        });
-        addForm(QStringLiteral("时序"), {
-            {QStringLiteral("响应超时"), QStringLiteral("1000 ms")},
-            {QStringLiteral("重试次数"), QStringLiteral("2")},
-            {QStringLiteral("重连间隔"), QStringLiteral("3000 ms")}
-        });
-        auto *test = new QPushButton(QStringLiteral("测试连接"));
-        layout->addWidget(test);
+        );
+
+
         layout->addStretch();
-        scroll->setWidget(panel);
+
+        scroll->setWidget(
+            panel
+        );
+
         return scroll;
     }
 
@@ -496,7 +4999,9 @@ private:
 
 void startDemoTimer()
 {
-    auto *timer = new QTimer(this);
+    auto *timer =
+        new QTimer(this);
+
 
     connect(
         timer,
@@ -505,41 +5010,71 @@ void startDemoTimer()
         [this]
         {
             clock_->setText(
-                QDateTime::currentDateTime().toString(
-                    QStringLiteral("yyyy-MM-dd  HH:mm:ss")
-                )
+                QDateTime::currentDateTime()
+                    .toString(
+                        QStringLiteral(
+                            "yyyy-MM-dd  HH:mm:ss"
+                        )
+                    )
             );
 
+
             // =================================================
-            // Modbus 工程
+            // 在线数据
             // =================================================
 
-            if (currentCommunicationType_ == QStringLiteral("modbus"))
+            if (onlineTable_)
             {
-                pollModbusSharedMemory();
+                if (
+                    currentCommunicationType_
+                    ==
+                    QStringLiteral("modbus")
+                )
+                {
+                    // Modbus 数据由 modbusTimer_ 负责刷新
+                }
+                else if (
+                    currentCommunicationType_
+                    ==
+                    QStringLiteral("python")
+                )
+                {
+                    pollManager();
+                }
             }
-            else if (onlineTable_)
+
+
+            // =================================================
+            // Python 调试数据
+            // =================================================
+
+            if (
+                currentCommunicationType_
+                ==
+                QStringLiteral("python")
+            )
             {
-                // =============================================
-                // 原来的 Python / system-manager 数据
-                // =============================================
+                if (overview_ || frames_)
+                {
+                    pollPythonDebug();
+                }
 
-                pollManager();
+                pollRuntimeLog();
             }
-
-            if (overview_ || frames_)
-                pollPythonDebug();
-
-            // pollRuntimeLog();  // 如果这个函数不存在，请注释掉或实现它
         }
     );
 
+
     timer->start(1000);
 
+
     clock_->setText(
-        QDateTime::currentDateTime().toString(
-            QStringLiteral("yyyy-MM-dd  HH:mm:ss")
-        )
+        QDateTime::currentDateTime()
+            .toString(
+                QStringLiteral(
+                    "yyyy-MM-dd  HH:mm:ss"
+                )
+            )
     );
 }
 
@@ -629,10 +5164,38 @@ void startDemoTimer()
     }
 
     void rebuildProjectTree()
+{
+    if (
+        !projectRootItem_
+        ||
+        !pythonTasksItem_
+        ||
+        !modbusTasksItem_
+    )
     {
-        if (!projectRootItem_ || !pythonTasksItem_) return;
-        projectRootItem_->setText(0, currentProjectName_);
-        while (pythonTasksItem_->childCount()) delete pythonTasksItem_->takeChild(0);
+        return;
+    }
+
+    projectRootItem_->setText(
+        0,
+        currentProjectName_
+    );
+
+
+    // 清理 Python 任务
+    while (pythonTasksItem_->childCount())
+    {
+        delete pythonTasksItem_->takeChild(0);
+    }
+
+
+    // 清理 Modbus 任务
+    while (modbusTasksItem_->childCount())
+    {
+        delete modbusTasksItem_->takeChild(0);
+    }
+
+    modbusPointsItem_ = nullptr;
         int pointCount = 0;
         QList<QVariantList> taskRows;
         debugTasks_.clear();
@@ -660,28 +5223,219 @@ void startDemoTimer()
             }
         }
         QSqlDatabase::removeDatabase(connectionName);
+        // =====================================================
+// 从 ModbusCollector 数据库加载 Modbus 采集任务
+// =====================================================
+
+const QString modbusConnectionName =
+    QStringLiteral("modbus_tree_%1")
+    .arg(
+        reinterpret_cast<quintptr>(this)
+    );
+
+{
+    QSqlDatabase modbusDb =
+        QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"),
+            modbusConnectionName
+        );
+
+    modbusDb.setDatabaseName(
+        modbusConfigDatabase_
+    );
+
+
+    if (modbusDb.open())
+    {
+        QSqlQuery modbusQuery(
+            modbusDb
+        );
+
+        if (
+            modbusQuery.exec(
+                QStringLiteral(
+                    "SELECT "
+                    "t.id, "
+                    "t.name, "
+                    "t.enable, "
+                    "("
+                    "SELECT COUNT(*) "
+                    "FROM modbus_points p "
+                    "WHERE p.task_id = t.id"
+                    ") "
+                    "FROM modbus_tasks t "
+                    "ORDER BY t.id"
+                )
+            )
+        )
+        {
+            while (
+                modbusQuery.next()
+            )
+            {
+                const qlonglong taskId =
+                    modbusQuery
+                    .value(0)
+                    .toLongLong();
+
+                const QString taskName =
+                    modbusQuery
+                    .value(1)
+                    .toString();
+
+                const bool enabled =
+                    modbusQuery
+                    .value(2)
+                    .toBool();
+
+                const int modbusPointCount =
+                    modbusQuery
+                    .value(3)
+                    .toInt();
+
+
+                // =========================================
+                // Modbus 任务节点
+                // =========================================
+
+                auto *taskItem =
+                    new QTreeWidgetItem(
+                        modbusTasksItem_
+                    );
+
+                taskItem->setText(
+                    0,
+                    taskName
+                    +
+                    (
+                        enabled
+                        ?
+                        QStringLiteral(" [启用]")
+                        :
+                        QStringLiteral(" [停用]")
+                    )
+                );
+
+                taskItem->setIcon(
+                    0,
+                    pixelIcon(
+                        QColor("#800080"),
+                        1
+                    )
+                );
+
+                taskItem->setData(
+                    0,
+                    Qt::UserRole,
+                    QStringLiteral(
+                        "modbus_task"
+                    )
+                );
+
+                // 保存数据库中的 task_id
+                taskItem->setData(
+                    0,
+                    Qt::UserRole + 1,
+                    taskId
+                );
+
+
+                // =========================================
+                // 当前任务下面的点表
+                // =========================================
+
+                auto *pointsItem =
+                    new QTreeWidgetItem(
+                        taskItem
+                    );
+
+                pointsItem->setText(
+                    0,
+                    QStringLiteral(
+                        "点表 (%1)"
+                    )
+                    .arg(
+                        modbusPointCount
+                    )
+                );
+
+                pointsItem->setIcon(
+                    0,
+                    pixelIcon(
+                        QColor("#008080"),
+                        1
+                    )
+                );
+
+                pointsItem->setData(
+                    0,
+                    Qt::UserRole,
+                    QStringLiteral(
+                        "modbus_points"
+                    )
+                );
+
+                // 点表节点同样保存所属 task_id
+                pointsItem->setData(
+                    0,
+                    Qt::UserRole + 1,
+                    taskId
+                );
+
+
+                // 为兼容当前已有成员变量，
+                // 暂时让它指向第一个 Modbus 点表。
+                if (!modbusPointsItem_)
+                {
+                    modbusPointsItem_ =
+                        pointsItem;
+                }
+
+
+                taskItem->setExpanded(
+                    true
+                );
+            }
+        }
+
+        modbusDb.close();
+    }
+}
+
+QSqlDatabase::removeDatabase(
+    modbusConnectionName
+);
         if (pointDirectoryItem_)
             pointDirectoryItem_->setText(0, QStringLiteral("点目录 (%1)").arg(pointCount));
         projectRootItem_->setExpanded(true);
-        pythonTasksItem_->setExpanded(true);
+pythonTasksItem_->setExpanded(true);
+
+if (modbusCommunicationItem_)
+{
+    modbusCommunicationItem_->setExpanded(
+        true
+    );
+}
+
+if (modbusTasksItem_)
+{
+    modbusTasksItem_->setExpanded(
+        true
+    );
+}
         if (projectVersionLabel_)
             projectVersionLabel_->setText(QStringLiteral("工程点数: %1").arg(pointCount));
-        if (overview_) {
-            overview_->setRowCount(taskRows.size());
-            for (int row = 0; row < taskRows.size(); ++row) {
-                const QStringList values = {
-                    taskRows[row][2].toBool() ? QStringLiteral("○ 已配置") : QStringLiteral("○ 已停用"),
-                    taskRows[row][1].toString(), QStringLiteral("Python / Runner"), QStringLiteral("本机共享内存"),
-                    QStringLiteral("--"), QStringLiteral("--"), QStringLiteral("待启动")
-                };
-                for (int column = 0; column < values.size(); ++column)
-                    overview_->setItem(row, column, new QTableWidgetItem(values[column]));
-                overview_->item(row, 0)->setData(Qt::UserRole, taskRows[row][0]);
-                overview_->item(row, 0)->setForeground(taskRows[row][2].toBool() ? QColor("#000080") : QColor("#808080"));
-            }
+                if (overview_) {
+            if (taskSummary_)
+                taskSummary_->setText(
+                    QStringLiteral("0 / %1").arg(taskRows.size())
+                );
+
+            if (pointSummary_)
+                pointSummary_->setText(
+                    QStringLiteral("%1 点").arg(pointCount)
+                );
         }
-        if (taskSummary_) taskSummary_->setText(QStringLiteral("0 / %1").arg(taskRows.size()));
-        if (pointSummary_) pointSummary_->setText(QStringLiteral("%1 点").arg(pointCount));
     }
 
     bool loadProjectFile(const QString &metadataPath)
@@ -750,42 +5504,66 @@ void startDemoTimer()
 {
     QDialog dialog(this);
 
-    dialog.setWindowTitle(QStringLiteral("新建通信工程"));
-    dialog.resize(420, 220);
-
-    auto *layout = new QVBoxLayout(&dialog);
-
-    auto *typeLabel =
-        new QLabel(QStringLiteral("请选择通信类型："));
-
-    layout->addWidget(typeLabel);
-
-
-    auto *typeCombo = new QComboBox;
-
-    typeCombo->addItem(
-        QStringLiteral("Python 通信工程"),
-        QStringLiteral("python")
+    dialog.setWindowTitle(
+        QStringLiteral("新建通信工程")
     );
 
-    typeCombo->addItem(
-        QStringLiteral("Modbus 通信工程"),
-        QStringLiteral("modbus")
-    );
 
-    layout->addWidget(typeCombo);
+    auto *layout =
+        new QVBoxLayout(&dialog);
 
 
-    auto *nameLabel =
-        new QLabel(QStringLiteral("工程名称："));
-
-    layout->addWidget(nameLabel);
+    auto *form =
+        new QFormLayout;
 
 
     auto *name =
-        new QLineEdit(QStringLiteral("新建通信工程"));
+        new QLineEdit(
+            QStringLiteral("新建通信工程")
+        );
 
-    layout->addWidget(name);
+
+    auto *parent =
+        new QLineEdit(
+            QStandardPaths::writableLocation(
+                QStandardPaths::DocumentsLocation
+            )
+        );
+
+
+    auto *choose =
+        new QPushButton(
+            QStringLiteral("浏览...")
+        );
+
+
+    auto *pathRow =
+        new QHBoxLayout;
+
+
+    pathRow->addWidget(
+        parent,
+        1
+    );
+
+    pathRow->addWidget(
+        choose
+    );
+
+
+    form->addRow(
+        QStringLiteral("工程名称:"),
+        name
+    );
+
+
+    form->addRow(
+        QStringLiteral("保存位置:"),
+        pathRow
+    );
+
+
+    layout->addLayout(form);
 
 
     auto *buttons =
@@ -794,15 +5572,44 @@ void startDemoTimer()
             QDialogButtonBox::Cancel
         );
 
+
+    buttons
+        ->button(
+            QDialogButtonBox::Ok
+        )
+        ->setText(
+            QStringLiteral("创建工程")
+        );
+
+
     layout->addWidget(buttons);
 
 
+    // =====================================================
+    // 选择目录
+    // =====================================================
+
     connect(
-        buttons,
-        &QDialogButtonBox::accepted,
+        choose,
+        &QPushButton::clicked,
         &dialog,
-        &QDialog::accept
+        [&]()
+        {
+            const QString selected =
+                QFileDialog::getExistingDirectory(
+                    &dialog,
+                    QStringLiteral("选择工程保存位置"),
+                    parent->text()
+                );
+
+
+            if (!selected.isEmpty())
+            {
+                parent->setText(selected);
+            }
+        }
     );
+
 
     connect(
         buttons,
@@ -812,24 +5619,58 @@ void startDemoTimer()
     );
 
 
-    if (dialog.exec() != QDialog::Accepted)
+    connect(
+        buttons,
+        &QDialogButtonBox::accepted,
+        &dialog,
+        &QDialog::accept
+    );
+
+
+    if (
+        dialog.exec()
+        !=
+        QDialog::Accepted
+    )
+    {
         return;
+    }
 
 
-    const QString projectType =
-        typeCombo->currentData().toString();
-
+    // =====================================================
+    // 工程名称
+    // =====================================================
 
     const QString projectName =
         name->text().trimmed();
 
 
-    if (projectName.isEmpty())
+    QString folderName =
+        projectName;
+
+
+    folderName.replace(
+        QRegularExpression(
+            QStringLiteral(
+                "[\\/:*?\"<>|]"
+            )
+        ),
+        QStringLiteral("_")
+    );
+
+
+    if (
+        projectName.isEmpty()
+        ||
+        folderName.isEmpty()
+    )
     {
         QMessageBox::warning(
             this,
-            QStringLiteral("工程名称不能为空"),
-            QStringLiteral("请输入工程名称。")
+            QStringLiteral("名称无效"),
+            QStringLiteral(
+                "请输入有效的工程名称。"
+            )
         );
 
         return;
@@ -837,147 +5678,334 @@ void startDemoTimer()
 
 
     // =====================================================
-    // Modbus 工程
+    // 创建工程目录
     // =====================================================
 
-    if (projectType == QStringLiteral("modbus"))
-{
-    createModbusProject(projectName);
-    return;
-}
-
-
-// =====================================================
-// 其他工程类型暂不处理
-// =====================================================
-
-QMessageBox::information(
-    this,
-    QStringLiteral("提示"),
-    QStringLiteral("当前版本暂时只启用 Modbus 工程创建功能。")
-);
-}
-
-void createModbusProject(const QString &projectName)
-{
-    // =====================================================
-    // Modbus 工程不需要 project.json
-    //
-    // 因为 ModbusCollector 已经负责：
-    //
-    // Modbus TCP
-    //      ↓
-    // 数据采集
-    //      ↓
-    // POSIX Shared Memory
-    // /modbus_data
-    //
-    // Qt 上位机只负责读取共享内存
-    // =====================================================
-
-
-    currentProjectDirectory_.clear();
-
-    currentDatabase_.clear();
-
-    currentScriptsRoot_.clear();
-
-
-    setWindowTitle(
-        QStringLiteral("Retro DCS - %1 [Modbus]")
-            .arg(projectName)
+    QDir parentDirectory(
+        parent->text()
     );
 
 
-    // =====================================================
-    // 保存当前工程类型
-    // =====================================================
-
-    currentCommunicationType_ =
-        QStringLiteral("modbus");
+    const QString directoryPath =
+        parentDirectory.filePath(
+            folderName
+        );
 
 
-    // =====================================================
-    // 更新状态栏
-    // =====================================================
-
-    statusBar()->showMessage(
-        QStringLiteral(
-            "Modbus 通信工程已创建。数据源：共享内存 /modbus_data"
-        ),
-        5000
-    );
-
-
-    // =====================================================
-    // 通信运行总览
-    // =====================================================
-
-    if (overview_)
+    if (
+        QFileInfo::exists(
+            directoryPath
+        )
+    )
     {
-        overview_->setRowCount(0);
+        QMessageBox::warning(
+            this,
+            QStringLiteral("目录已存在"),
+            directoryPath
+        );
 
-        const int row = overview_->rowCount();
-
-        overview_->insertRow(row);
-
-
-        const QStringList values = {
-
-            QStringLiteral("○ 离线"),
-
-            projectName,
-
-            QStringLiteral("Modbus TCP"),
-
-            QStringLiteral("共享内存 /modbus_data"),
-
-            QStringLiteral("本机"),
-
-            QStringLiteral("实时采集"),
-
-            QStringLiteral("等待启动")
-
-        };
+        return;
+    }
 
 
-        for (int column = 0;
-             column < values.size();
-             ++column)
-        {
-            overview_->setItem(
-                row,
-                column,
-                new QTableWidgetItem(
-                    values[column]
+    if (
+        !QDir().mkpath(
+            QDir(directoryPath)
+                .filePath(
+                    QStringLiteral("scripts")
+                )
+        )
+    )
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("创建失败"),
+            QStringLiteral(
+                "无法创建工程目录。"
+            )
+        );
+
+        return;
+    }
+
+
+    // =====================================================
+    // 创建 SQLite 配置数据库
+    //
+    // Python 通信使用
+    // =====================================================
+
+    const QString databasePath =
+        QDir(directoryPath)
+            .filePath(
+                QStringLiteral(
+                    "config.sqlite"
                 )
             );
+
+
+    const QString generator =
+        QDir(workspaceRoot())
+            .filePath(
+                QStringLiteral(
+                    "python-communication-demo/"
+                    "tools/create_demo_db.py"
+                )
+            );
+
+
+    QProcess generatorProcess;
+
+
+    generatorProcess.start(
+        QStringLiteral("python3"),
+        {
+            generator,
+            databasePath
+        }
+    );
+
+
+    if (
+        !generatorProcess.waitForFinished(10000)
+        ||
+        generatorProcess.exitCode()
+        != 0
+    )
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("创建失败"),
+            QStringLiteral(
+                "无法初始化 SQLite 配置库。"
+            )
+        );
+
+        return;
+    }
+
+
+    // =====================================================
+    // 初始化空工程
+    // =====================================================
+
+    const QString connectionName =
+        QStringLiteral(
+            "create_project_%1"
+        )
+        .arg(
+            QCoreApplication::applicationPid()
+        );
+
+
+    bool databaseReady = false;
+
+
+    {
+        QSqlDatabase db =
+            QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"),
+                connectionName
+            );
+
+
+        db.setDatabaseName(
+            databasePath
+        );
+
+
+        if (
+            db.open()
+            &&
+            db.transaction()
+        )
+        {
+            QSqlQuery query(db);
+
+
+            const QString projectHash =
+                QUuid::createUuid()
+                    .toString(
+                        QUuid::WithoutBraces
+                    );
+
+
+            databaseReady =
+                query.exec(
+                    QStringLiteral(
+                        "DELETE FROM python_binding"
+                    )
+                )
+                &&
+                query.exec(
+                    QStringLiteral(
+                        "DELETE FROM python_task"
+                    )
+                )
+                &&
+                query.exec(
+                    QStringLiteral(
+                        "DELETE FROM point"
+                    )
+                )
+                &&
+                query.exec(
+                    QStringLiteral(
+                        "UPDATE config_version "
+                        "SET content_hash='%1' "
+                        "WHERE status='PUBLISHED'"
+                    )
+                    .arg(projectHash)
+                )
+                &&
+                db.commit();
+
+
+            if (!databaseReady)
+            {
+                db.rollback();
+            }
+
+
+            db.close();
         }
     }
 
 
-    // =====================================================
-    // 清空在线数据
-    // =====================================================
+    QSqlDatabase::removeDatabase(
+        connectionName
+    );
 
-    if (onlineTable_)
+
+    if (!databaseReady)
     {
-        onlineTable_->setRowCount(0);
-    }
-
-
-    // =====================================================
-    // 修改提示
-    // =====================================================
-
-    if (runtimeLog_)
-    {
-        runtimeLog_->appendPlainText(
+        QMessageBox::critical(
+            this,
+            QStringLiteral("创建失败"),
             QStringLiteral(
-                "[INFO] Modbus 工程创建成功，等待读取共享内存 /modbus_data"
+                "无法初始化空工程配置。"
             )
         );
+
+        return;
     }
+
+
+    // =====================================================
+    // 创建 project.json
+    // =====================================================
+
+    QSaveFile metadata(
+        QDir(directoryPath)
+            .filePath(
+                QStringLiteral(
+                    "project.json"
+                )
+            )
+    );
+
+
+    if (
+        !metadata.open(
+            QIODevice::WriteOnly |
+            QIODevice::Text
+        )
+    )
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("创建失败"),
+            metadata.errorString()
+        );
+
+        return;
+    }
+
+
+    metadata.write(
+        QJsonDocument(
+            QJsonObject{
+                {
+                    QStringLiteral(
+                        "formatVersion"
+                    ),
+                    1
+                },
+                {
+                    QStringLiteral(
+                        "name"
+                    ),
+                    projectName
+                },
+                {
+                    QStringLiteral(
+                        "database"
+                    ),
+                    QStringLiteral(
+                        "config.sqlite"
+                    )
+                },
+                {
+                    QStringLiteral(
+                        "scripts"
+                    ),
+                    QStringLiteral(
+                        "scripts"
+                    )
+                }
+            }
+        )
+        .toJson(
+            QJsonDocument::Indented
+        )
+    );
+
+
+    if (!metadata.commit())
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("创建失败"),
+            metadata.errorString()
+        );
+
+        return;
+    }
+
+
+    // =====================================================
+    // 加载刚创建的工程
+    //
+    // 注意：
+    // 这里只加载工程
+    //
+    // 不启动 Python 检测
+    // 不启动 Modbus 检测
+    // =====================================================
+
+    loadProjectFile(
+        QDir(directoryPath)
+            .filePath(
+                QStringLiteral(
+                    "project.json"
+                )
+            )
+    );
+
+
+    // =====================================================
+    // 默认不选择任何检测状态
+    // =====================================================
+
+    currentCommunicationType_.clear();
+
+
+    statusBar()->showMessage(
+        QStringLiteral(
+            "工程创建成功。请选择采集设备中的通信通道，然后点击“启动检测”。"
+        ),
+        5000
+    );
 }
 
     QJsonObject queryManager(quint16 messageType, QString *error = nullptr,
@@ -1008,24 +6036,32 @@ void createModbusProject(const QString &projectName)
 void startModbusDetection()
 {
     // =====================================================
-    // 尝试读取 ModbusCollector 写入的共享内存
+    // 1. 测试 ModbusServer TCP 连接
     // =====================================================
 
-    QVector<ModbusSharedVariable> variables;
     QString error;
 
-    if (!modbusSharedMemoryReader_.read(variables, &error))
+    const QJsonObject ping =
+        modbusServerClient_.request(
+            1,
+            modbusRequestId_,
+            &error
+        );
+
+
+    if (ping.isEmpty())
     {
         QMessageBox::warning(
             this,
-            QStringLiteral("未检测到 Modbus 数据"),
+            QStringLiteral("未检测到 Modbus 数据服务"),
             QStringLiteral(
-                "无法读取共享内存 /modbus_data。\n\n"
+                "无法连接 ModbusCollector 的 ModbusServer。\n\n"
+                "地址：127.0.0.1:19091\n\n"
                 "错误信息：%1\n\n"
                 "请确认：\n"
                 "1. ModbusCollector 已经启动\n"
                 "2. ModbusCollector 正在采集数据\n"
-                "3. ModbusCollector 已经写入共享内存"
+                "3. ModbusServer 已经监听 19091 端口"
             ).arg(error)
         );
 
@@ -1033,30 +6069,43 @@ void startModbusDetection()
     }
 
 
-    if (variables.isEmpty())
-    {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("未检测到 Modbus 数据"),
-            QStringLiteral(
-                "共享内存 /modbus_data 中暂时没有变量数据。\n\n"
-                "请确认 ModbusCollector 已经成功采集数据。"
-            )
-        );
-
-        return;
-    }
-
-
     // =====================================================
-    // 更新工程状态
+    // 2. 更新工程状态
     // =====================================================
 
-    if (overview_
-        && overview_->rowCount() > 0)
+    if (overview_)
+{
+    for (
+        int row = 0;
+        row < overview_->rowCount();
+        ++row
+    )
     {
-        auto *state =
-            overview_->item(0, 0);
+        QTableWidgetItem *channel =
+            overview_->item(
+                row,
+                1
+            );
+
+
+        if (
+            !channel
+            ||
+            channel->text()
+            !=
+            QStringLiteral("Modbus 通信")
+        )
+        {
+            continue;
+        }
+
+
+        QTableWidgetItem *state =
+            overview_->item(
+                row,
+                0
+            );
+
 
         if (state)
         {
@@ -1070,34 +6119,58 @@ void startModbusDetection()
         }
 
 
-        if (overview_->item(0, 3))
+        if (
+            overview_->item(
+                row,
+                3
+            )
+        )
         {
-            overview_->item(0, 3)->setText(
+            overview_->item(
+                row,
+                3
+            )
+            ->setText(
                 QStringLiteral(
-                    "共享内存 /modbus_data"
+                    "127.0.0.1:502"
                 )
             );
         }
 
 
-        if (overview_->item(0, 6))
+        if (
+            overview_->item(
+                row,
+                6
+            )
+        )
         {
-            overview_->item(0, 6)->setText(
-                QStringLiteral("运行正常")
+            overview_->item(
+                row,
+                6
+            )
+            ->setText(
+                QStringLiteral(
+                    "运行正常"
+                )
             );
         }
+
+
+        break;
     }
+}
 
 
     // =====================================================
-    // 更新一次在线数据
+    // 3. 立即读取一次 ModbusServer 数据
     // =====================================================
 
-    pollModbusSharedMemory();
+    pollModbusServer();
 
 
     // =====================================================
-    // 启动定时刷新
+    // 4. 启动 TCP 数据定时刷新
     // =====================================================
 
     if (!modbusTimer_)
@@ -1112,7 +6185,7 @@ void startModbusDetection()
             this,
             [this]()
             {
-                pollModbusSharedMemory();
+                pollModbusServer();
             }
         );
     }
@@ -1120,6 +6193,10 @@ void startModbusDetection()
 
     modbusTimer_->start(500);
 
+
+    // =====================================================
+    // 5. 更新界面状态
+    // =====================================================
 
     serviceStatus_->setText(
         QStringLiteral(
@@ -1137,7 +6214,7 @@ void startModbusDetection()
 
     statusBar()->showMessage(
         QStringLiteral(
-            "Modbus 检测已启动，正在读取共享内存 /modbus_data"
+            "Modbus 检测已启动，正在通过 TCP 读取 ModbusServer"
         ),
         3000
     );
@@ -1146,11 +6223,38 @@ void startModbusDetection()
     void startManager()
 {
     // =====================================================
-    // Modbus 工程
+    // 必须先选择通信通道
     // =====================================================
 
-    if (currentCommunicationType_
-        == QStringLiteral("modbus"))
+    if (
+        currentCommunicationType_.isEmpty()
+    )
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("请选择通信通道"),
+            QStringLiteral(
+                "请先在左侧工程树中选择：\n\n"
+                "采集设备 → Python 通信\n\n"
+                "或\n\n"
+                "采集设备 → Modbus 通信\n\n"
+                "然后再点击“启动检测”。"
+            )
+        );
+
+        return;
+    }
+
+
+    // =====================================================
+    // Modbus
+    // =====================================================
+
+    if (
+        currentCommunicationType_
+        ==
+        QStringLiteral("modbus")
+    )
     {
         startModbusDetection();
 
@@ -1159,130 +6263,637 @@ void startModbusDetection()
 
 
     // =====================================================
-    // 原来的 Python system-managerd 逻辑
+    // Python
     // =====================================================
-        // ====================================================
-        // Modbus 模式
-        // ====================================================
-        if (modbusMode_)
-        {
-            if (!modbusRefreshTimer_)
-            {
-                modbusRefreshTimer_ = new QTimer(this);
 
-                connect(
-                    modbusRefreshTimer_,
-                    &QTimer::timeout,
-                    this,
-                    [this]()
-                    {
-                        pollModbusSharedMemory();
-                    }
+    if (
+        currentCommunicationType_
+        !=
+        QStringLiteral("python")
+    )
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("通信类型错误"),
+            QStringLiteral("未知的通信类型。")
+        );
+
+        return;
+    }
+
+
+    // =====================================================
+    // 以下保持原来的 Python system-managerd 逻辑
+    // =====================================================
+
+    QString error;
+
+    const QJsonObject existing =
+        queryManager(
+            1,
+            &error
+        );
+
+
+    if (
+        !existing.isEmpty()
+        &&
+        existing.value(
+            QStringLiteral("configHash")
+        ).toString()
+        !=
+        currentConfigHash()
+    )
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("检测配置不一致"),
+            QStringLiteral(
+                "端口 19090 上运行的是其他工程或旧配置。"
+                "请先停止现有检测服务，再启动当前工程。"
+            )
+        );
+
+        return;
+    }
+
+
+    if (!existing.isEmpty())
+    {
+        statusBar()->showMessage(
+            QStringLiteral(
+                "system-managerd 已经运行"
+            ),
+            3000
+        );
+
+        pollManager();
+
+        return;
+    }
+
+
+    if (
+        currentDatabase_.isEmpty()
+        ||
+        currentScriptsRoot_.isEmpty()
+    )
+    {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("没有工程"),
+            QStringLiteral(
+                "请先新建或打开一个工程。"
+            )
+        );
+
+        return;
+    }
+
+
+    bool runnable = false;
+
+
+    const QString checkConnection =
+        QStringLiteral(
+            "run_check_%1"
+        )
+        .arg(
+            QCoreApplication::applicationPid()
+        );
+
+
+    {
+        QSqlDatabase db =
+            QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"),
+                checkConnection
+            );
+
+
+        db.setDatabaseName(
+            currentDatabase_
+        );
+
+
+        if (db.open())
+        {
+            QSqlQuery query(db);
+
+            if (
+                query.exec(
+                    QStringLiteral(
+                        "SELECT "
+                        "(SELECT COUNT(*) FROM python_task WHERE enabled=1), "
+                        "(SELECT COUNT(*) FROM point WHERE enabled=1)"
+                    )
+                )
+                &&
+                query.next()
+            )
+            {
+                runnable =
+                    query.value(0).toInt() > 0
+                    &&
+                    query.value(1).toInt() > 0;
+            }
+
+            db.close();
+        }
+    }
+
+
+    QSqlDatabase::removeDatabase(
+        checkConnection
+    );
+
+
+    if (!runnable)
+    {
+        QMessageBox::information(
+            this,
+            QStringLiteral("工程尚未配置"),
+            QStringLiteral(
+                "请先在“采集设备 → Python 通信 → 脚本任务”中新建脚本并配置点。"
+            )
+        );
+
+        return;
+    }
+
+
+    const QDir root(
+        workspaceRoot()
+    );
+
+
+    const QString demo =
+        root.filePath(
+            QStringLiteral(
+                "python-communication-demo"
+            )
+        );
+
+
+    const QString executable =
+        QDir(demo).filePath(
+            QStringLiteral(
+                "build/system-managerd"
+            )
+        );
+
+
+    const QString database =
+        currentDatabase_;
+
+
+    if (
+        !QFileInfo(executable).isExecutable()
+        ||
+        !QFileInfo::exists(database)
+    )
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("无法启动检测"),
+            QStringLiteral(
+                "缺少 system-managerd 或 SQLite 配置。\n"
+                "请先执行：\n"
+                "cd %1 && make demo-db && make"
+            )
+            .arg(demo)
+        );
+
+        return;
+    }
+
+
+    if (managerProcess_)
+    {
+        managerProcess_->deleteLater();
+    }
+
+
+    managerProcess_ =
+        new QProcess(this);
+
+
+    managerProcess_->setWorkingDirectory(
+        demo
+    );
+
+
+    managerProcess_->setProcessChannelMode(
+        QProcess::MergedChannels
+    );
+
+
+    connect(
+        managerProcess_,
+        QOverload<
+            int,
+            QProcess::ExitStatus
+        >::of(
+            &QProcess::finished
+        ),
+        this,
+        [this](int code)
+        {
+            statusBar()->showMessage(
+                QStringLiteral(
+                    "system-managerd 已退出，代码 %1"
+                )
+                .arg(code),
+                5000
+            );
+
+            pollManager();
+        }
+    );
+
+
+    const QString shmName =
+        QStringLiteral(
+            "/pycom_ui_%1"
+        )
+        .arg(
+            QCoreApplication::applicationPid()
+        );
+
+
+    QDir(
+        currentProjectDirectory_
+    )
+    .mkpath(
+        QStringLiteral("run")
+    );
+
+
+    managerProcess_->start(
+        executable,
+        {
+            QStringLiteral("--database"),
+            database,
+
+            QStringLiteral("--scripts-root"),
+            currentScriptsRoot_,
+
+            QStringLiteral("--shm-name"),
+            shmName,
+
+            QStringLiteral("--log"),
+            QDir(
+                currentProjectDirectory_
+            )
+            .filePath(
+                QStringLiteral(
+                    "run/runtime.log"
+                )
+            ),
+
+            QStringLiteral("--python"),
+            QStringLiteral("python3"),
+
+            QStringLiteral("--runner"),
+            QDir(demo)
+                .filePath(
+                    QStringLiteral(
+                        "runner/runner.py"
+                    )
+                ),
+
+            QStringLiteral("--tcp-host"),
+            QStringLiteral("127.0.0.1"),
+
+            QStringLiteral("--tcp-port"),
+            QStringLiteral("19090")
+        }
+    );
+
+
+    if (
+        !managerProcess_
+            ->waitForStarted(1500)
+    )
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("启动失败"),
+            managerProcess_->errorString()
+        );
+
+        return;
+    }
+
+
+    statusBar()->showMessage(
+        QStringLiteral(
+            "正在启动 Python system-managerd..."
+        ),
+        2500
+    );
+
+
+    QTimer::singleShot(
+        500,
+        this,
+        [this]
+        {
+            pollManager();
+        }
+    );
+}
+
+    void stopManager()
+{
+    // =====================================================
+    // 停止 Modbus 检测
+    // =====================================================
+
+    if (
+        currentCommunicationType_
+        ==
+        QStringLiteral("modbus")
+    )
+    {
+        if (
+            modbusTimer_
+            &&
+            modbusTimer_->isActive()
+        )
+        {
+            modbusTimer_->stop();
+
+// =====================================================
+// 在线数据：停止检测后，将质量状态改为“已停止”
+//
+// 注意：
+// 实时值保留最后一次值
+// 采集时间保留最后一次时间
+// 只改变“质量”列
+// =====================================================
+
+if (onlineTable_)
+{
+    for (
+        int row = 0;
+        row < onlineTable_->rowCount();
+        ++row
+    )
+    {
+        QTableWidgetItem *qualityItem =
+            onlineTable_->item(
+                row,
+                8
+            );
+
+        if (!qualityItem)
+        {
+            qualityItem =
+                new QTableWidgetItem;
+
+            onlineTable_->setItem(
+                row,
+                8,
+                qualityItem
+            );
+        }
+
+        qualityItem->setText(
+            QStringLiteral("已停止")
+        );
+
+        qualityItem->setForeground(
+            QBrush(
+                QColor("#808080")
+            )
+        );
+
+        qualityItem->setToolTip(
+            QStringLiteral(
+                "Modbus 检测已停止，当前显示的是最后一次采集结果。"
+            )
+        );
+    }
+}
+
+
+// =====================================================
+// 系统总览：停止检测后同步运行状态
+//
+// 原来：
+// ●运行 | ... | 100.0% | 运行正常
+//
+// 停止后：
+// ○停止 | ... | -- | 已停止
+// =====================================================
+
+if (overview_)
+{
+    for (
+        int row = 0;
+        row < overview_->rowCount();
+        ++row
+    )
+    {
+        QTableWidgetItem *channelItem =
+            overview_->item(
+                row,
+                1
+            );
+
+        if (
+            !channelItem
+            ||
+            channelItem->text()
+            !=
+            QStringLiteral("Modbus 通信")
+        )
+        {
+            continue;
+        }
+
+
+        // ---------------------------------------------
+        // 第0列：状态
+        // ---------------------------------------------
+
+        QTableWidgetItem *statusItem =
+            overview_->item(
+                row,
+                0
+            );
+
+        if (!statusItem)
+        {
+            statusItem =
+                new QTableWidgetItem;
+
+            overview_->setItem(
+                row,
+                0,
+                statusItem
+            );
+        }
+
+        statusItem->setText(
+            QStringLiteral("○ 停止")
+        );
+
+        statusItem->setForeground(
+            QBrush(
+                QColor("#808080")
+            )
+        );
+
+
+        // ---------------------------------------------
+        // 第5列：成功率
+        //
+        // 停止检测时不能继续显示 100.0%
+        // 因为当前根本没有进行采集
+        // ---------------------------------------------
+
+        QTableWidgetItem *successItem =
+            overview_->item(
+                row,
+                5
+            );
+
+        if (!successItem)
+        {
+            successItem =
+                new QTableWidgetItem;
+
+            overview_->setItem(
+                row,
+                5,
+                successItem
+            );
+        }
+
+        successItem->setText(
+            QStringLiteral("--")
+        );
+
+        successItem->setForeground(
+            QBrush(
+                QColor("#808080")
+            )
+        );
+
+
+        // ---------------------------------------------
+        // 第6列：响应
+        // ---------------------------------------------
+
+        QTableWidgetItem *responseItem =
+            overview_->item(
+                row,
+                6
+            );
+
+        if (!responseItem)
+        {
+            responseItem =
+                new QTableWidgetItem;
+
+            overview_->setItem(
+                row,
+                6,
+                responseItem
+            );
+        }
+
+        responseItem->setText(
+            QStringLiteral("已停止")
+        );
+
+        responseItem->setForeground(
+            QBrush(
+                QColor("#808080")
+            )
+        );
+
+        break;
+    }
+}
+
+            if (serviceStatus_)
+            {
+                serviceStatus_->setText(
+                    QStringLiteral(
+                        "○ Modbus 检测已停止"
+                    )
+                );
+
+                serviceStatus_->setStyleSheet(
+                    QStringLiteral(
+                        "color:#800000;"
+                    )
                 );
             }
 
-            modbusRefreshTimer_->start(1000);
-
-            pollModbusSharedMemory();
 
             statusBar()->showMessage(
-                QStringLiteral("Modbus检测已启动，正在读取共享内存 /modbus_data")
-            );
-
-            QMessageBox::information(
-                this,
-                QStringLiteral("启动检测"),
                 QStringLiteral(
-                    "Modbus检测已启动。\n\n"
-                    "Qt上位机将直接读取 ModbusCollector 写入的共享内存：\n"
-                    "/modbus_data"
-                )
+                    "Modbus 检测已停止。"
+                ),
+                3000
             );
-
-            return;
         }
-        QString error;
-        const QJsonObject existing = queryManager(1, &error);
-        if (!existing.isEmpty() && existing.value(QStringLiteral("configHash")).toString() != currentConfigHash()) {
-            QMessageBox::critical(this, QStringLiteral("检测配置不一致"),
-                QStringLiteral("端口 19090 上运行的是其他工程或旧配置。请先停止现有检测服务，再启动当前工程。"));
-            return;
-        }
-        if (!existing.isEmpty()) {
-            statusBar()->showMessage(QStringLiteral("system-managerd 已经运行"), 3000);
-            pollManager();
-            return;
-        }
-        if (currentDatabase_.isEmpty() || currentScriptsRoot_.isEmpty()) {
-            QMessageBox::warning(this, QStringLiteral("没有工程"), QStringLiteral("请先新建或打开一个工程。"));
-            return;
-        }
-        bool runnable = false;
-        const QString checkConnection = QStringLiteral("run_check_%1").arg(QCoreApplication::applicationPid());
+        else
         {
-            QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), checkConnection);
-            db.setDatabaseName(currentDatabase_);
-            if (db.open()) {
-                QSqlQuery query(db);
-                if (query.exec(QStringLiteral("SELECT (SELECT COUNT(*) FROM python_task WHERE enabled=1), (SELECT COUNT(*) FROM point WHERE enabled=1)")) && query.next())
-                    runnable = query.value(0).toInt() > 0 && query.value(1).toInt() > 0;
-                db.close();
-            }
+            statusBar()->showMessage(
+                QStringLiteral(
+                    "Modbus 检测未运行。"
+                ),
+                3000
+            );
         }
-        QSqlDatabase::removeDatabase(checkConnection);
-        if (!runnable) {
-            QMessageBox::information(this, QStringLiteral("工程尚未配置"),
-                QStringLiteral("请先在“采集设备 → Python 通信 → 脚本任务”中新建脚本并配置点。"));
-            return;
-        }
-        const QDir root(workspaceRoot());
-        const QString demo = root.filePath(QStringLiteral("python-communication-demo"));
-        const QString executable = QDir(demo).filePath(QStringLiteral("build/system-managerd"));
-        const QString database = currentDatabase_;
-        if (!QFileInfo(executable).isExecutable() || !QFileInfo::exists(database)) {
-            QMessageBox::critical(this, QStringLiteral("无法启动检测"),
-                QStringLiteral("缺少 system-managerd 或 SQLite 配置。\n请先执行：\ncd %1 && make demo-db && make").arg(demo));
-            return;
-        }
-        if (managerProcess_) managerProcess_->deleteLater();
-        managerProcess_ = new QProcess(this);
-        managerProcess_->setWorkingDirectory(demo);
-        managerProcess_->setProcessChannelMode(QProcess::MergedChannels);
-        connect(managerProcess_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [this](int code) {
-            statusBar()->showMessage(QStringLiteral("system-managerd 已退出，代码 %1").arg(code), 5000);
-            pollManager();
-        });
-        const QString shmName = QStringLiteral("/pycom_ui_%1").arg(QCoreApplication::applicationPid());
-        QDir(currentProjectDirectory_).mkpath(QStringLiteral("run"));
-        managerProcess_->start(executable, {
-            QStringLiteral("--database"), database,
-            QStringLiteral("--scripts-root"), currentScriptsRoot_,
-            QStringLiteral("--shm-name"), shmName,
-            QStringLiteral("--log"), QDir(currentProjectDirectory_).filePath(QStringLiteral("run/runtime.log")),
-            QStringLiteral("--python"), QStringLiteral("python3"),
-            QStringLiteral("--runner"), QDir(demo).filePath(QStringLiteral("runner/runner.py")),
-            QStringLiteral("--tcp-host"), QStringLiteral("127.0.0.1"),
-            QStringLiteral("--tcp-port"), QStringLiteral("19090")
-        });
-        if (!managerProcess_->waitForStarted(1500)) {
-            QMessageBox::critical(this, QStringLiteral("启动失败"), managerProcess_->errorString());
-            return;
-        }
-        statusBar()->showMessage(QStringLiteral("正在启动 system-managerd..."), 2500);
-        QTimer::singleShot(500, this, [this] { pollManager(); });
+
+
+        return;
     }
 
-    void stopManager()
+
+    // =====================================================
+    // 停止 Python 检测
+    // =====================================================
+
+    if (
+        !managerProcess_
+        ||
+        managerProcess_->state()
+        ==
+        QProcess::NotRunning
+    )
     {
-        if (!managerProcess_ || managerProcess_->state() == QProcess::NotRunning) {
-            statusBar()->showMessage(QStringLiteral("检测服务不是由本上位启动，未执行停止"), 4000);
-            return;
-        }
-        managerProcess_->terminate();
-        if (!managerProcess_->waitForFinished(2000)) managerProcess_->kill();
-        pollManager();
+        statusBar()->showMessage(
+            QStringLiteral(
+                "Python 检测服务未运行。"
+            ),
+            3000
+        );
+
+        return;
     }
+
+
+    managerProcess_->terminate();
+
+
+    if (
+        !managerProcess_
+            ->waitForFinished(2000)
+    )
+    {
+        managerProcess_->kill();
+    }
+
+
+    pollManager();
+}
 
     void showScriptEditor(qlonglong editingTaskId = 0, bool readOnly = false)
     {
@@ -1817,10 +7428,12 @@ QWidget *createOnlineDataPage()
     auto *layout = new QVBoxLayout(page);
 
     auto *hint = new QLabel(
-        QStringLiteral(
-            " 在线数据来自 ModbusCollector 共享内存 /modbus_data，每秒刷新一次。"
-        )
-    );
+    QStringLiteral(
+        " 数据通道：ModbusCollector ModbusServer TCP 127.0.0.1:19091"
+        "    |    界面刷新周期：500 ms"
+        "    |    各 Modbus 任务按各自配置的采集周期独立采集"
+    )
+);
 
     hint->setStyleSheet(
         QStringLiteral(
@@ -1839,19 +7452,18 @@ QWidget *createOnlineDataPage()
 
     onlineTable_ = new QTableWidget(0, 10);
 
-    onlineTable_->setHorizontalHeaderLabels({
-        QStringLiteral("点ID"),
-        QStringLiteral("点名"),
-        QStringLiteral("Slave ID"),
-        QStringLiteral("功能码"),
-        QStringLiteral("地址"),
-        QStringLiteral("数据类型"),
-        QStringLiteral("实时值"),
-        QStringLiteral("质量"),
-        QStringLiteral("采集时间"),
-        QStringLiteral("Modbus 原始报文")
-    });
-
+onlineTable_->setHorizontalHeaderLabels({
+    QStringLiteral("点ID"),
+    QStringLiteral("点名"),
+    QStringLiteral("Slave ID"),
+    QStringLiteral("Modbus地址"),
+    QStringLiteral("读写方向"),
+    QStringLiteral("数据类型"),
+    QStringLiteral("大小端转换"),
+    QStringLiteral("实时值"),
+    QStringLiteral("质量"),
+    QStringLiteral("采集时间")
+});
 
     onlineTable_->setAlternatingRowColors(true);
 
@@ -1872,27 +7484,21 @@ QWidget *createOnlineDataPage()
     // 列宽
     // =========================================================
 
-    onlineTable_->setColumnWidth(0, 70);   // 点ID
-    onlineTable_->setColumnWidth(1, 150);  // 点名
-    onlineTable_->setColumnWidth(2, 80);   // Slave ID
-    onlineTable_->setColumnWidth(3, 80);   // 功能码
-    onlineTable_->setColumnWidth(4, 80);   // 地址
-    onlineTable_->setColumnWidth(5, 100);  // 数据类型
-    onlineTable_->setColumnWidth(6, 120);  // 实时值
-    onlineTable_->setColumnWidth(7, 80);   // 质量
-    onlineTable_->setColumnWidth(8, 190);  // 时间
-    onlineTable_->setColumnWidth(9, 420);  // 原始报文
+    onlineTable_->setColumnWidth(0, 70);    // 点ID
+    onlineTable_->setColumnWidth(1, 150);   // 点名
+    onlineTable_->setColumnWidth(2, 80);    // Slave ID
+    onlineTable_->setColumnWidth(3, 100);   // Modbus地址
+    onlineTable_->setColumnWidth(4, 100);   // 读写方向
+    onlineTable_->setColumnWidth(5, 100);   // 数据类型
+    onlineTable_->setColumnWidth(6, 110);   // 大小端转换
+    onlineTable_->setColumnWidth(7, 120);   // 实时值
+    onlineTable_->setColumnWidth(8, 80);    // 质量
+    onlineTable_->setColumnWidth(9, 190);   // 采集时间
 
 
     // 点名可以自动扩展
     onlineTable_->horizontalHeader()->setSectionResizeMode(
         1,
-        QHeaderView::Stretch
-    );
-
-    // 原始报文也允许扩展
-    onlineTable_->horizontalHeader()->setSectionResizeMode(
-        9,
         QHeaderView::Stretch
     );
 
@@ -1920,22 +7526,117 @@ QWidget *createOnlineDataPage()
             if (row < 0)
                 return;
 
+
+            // =========================================================
+            // 任务分组标题行不允许执行强制值
+            //
+            // 普通点行：
+            //     Qt::UserRole + 1 = "point"
+            //
+            // 任务标题行：
+            //     Qt::UserRole + 1 = "task_header"
+            // =========================================================
+
+            QTableWidgetItem *firstItem =
+                onlineTable_->item(
+                    row,
+                    0
+                );
+
+            if (
+                !firstItem
+                ||
+                firstItem->data(
+                    Qt::UserRole + 1
+                ).toString()
+                    == QStringLiteral("task_header")
+            )
+            {
+                return;
+            }
+
+
             QMenu menu(onlineTable_);
+
+
+            // =========================================================
+            // 当前逻辑点是否处于强制状态
+            // =========================================================
+
+            const bool forced =
+                firstItem->data(
+                    Qt::UserRole + 2
+                ).toBool();
+
+            const QString pointDirection =
+                onlineTable_->item(row, 4)
+                    ? onlineTable_->item(row, 4)->text()
+                    : QString();
+
+            const bool isOutput =
+                pointDirection == QStringLiteral("OUTPUT");
+
+
+            // =========================================================
+            // 强制值
+            //
+            // 即使已经处于强制状态，也允许再次强制，
+            // 用于修改当前 forcedValue。
+            // =========================================================
 
             auto *force =
                 menu.addAction(
                     pixelIcon(QColor("#800000"), 2),
-                    QStringLiteral("强制值...")
+                    isOutput
+                        ? QStringLiteral("写入设备...")
+                        : QStringLiteral("强制值...")
                 );
 
-            if (
+
+            // =========================================================
+            // 解除强制
+            //
+            // 只有 forced == true 时才显示。
+            // =========================================================
+
+            QAction *releaseForce =
+                nullptr;
+
+            if (forced && !isOutput)
+            {
+                releaseForce =
+                    menu.addAction(
+                        pixelIcon(QColor("#008000"), 2),
+                        QStringLiteral("解除强制")
+                    );
+            }
+
+
+            // =========================================================
+            // 显示菜单
+            // =========================================================
+
+            QAction *selectedAction =
                 menu.exec(
                     onlineTable_->viewport()
                         ->mapToGlobal(position)
-                ) == force
+                );
+
+
+            if (
+                selectedAction ==
+                force
             )
             {
                 forceOnlineValue(row);
+            }
+            else if (
+                releaseForce &&
+                selectedAction ==
+                releaseForce
+            )
+            {
+                releaseOnlineValue(row);
             }
         }
     );
@@ -1944,46 +7645,617 @@ QWidget *createOnlineDataPage()
     return page;
 }
 
+// ============================================================
+// releaseOnlineValue
+//
+// 解除 Modbus 逻辑点强制。
+//
+// 这里只向 ModbusServer 发送：
+//     MSG_RELEASE_FORCE = 4
+//
+// ModbusServer 只清除共享内存：
+//     forced      = 0
+//     forcedValue = 0
+//
+// 不向真实 Modbus 设备发送 FC06 / FC16。
+// ============================================================
 
+void releaseOnlineValue(int row)
+{
+    if (
+        !onlineTable_ ||
+        row < 0 ||
+        row >= onlineTable_->rowCount()
+    )
+    {
+        return;
+    }
+
+
+    // ========================================================
+    // 目前“解除强制”只用于 Modbus 工程
+    // ========================================================
+
+    if (
+        currentCommunicationType_
+        !=
+        QStringLiteral("modbus")
+    )
+    {
+        return;
+    }
+
+
+    QTableWidgetItem *idItem =
+        onlineTable_->item(
+            row,
+            0
+        );
+
+    QTableWidgetItem *nameItem =
+        onlineTable_->item(
+            row,
+            1
+        );
+
+
+    if (
+        !idItem ||
+        !nameItem
+    )
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("解除强制失败"),
+            QStringLiteral(
+                "当前点数据不完整"
+            )
+        );
+
+        return;
+    }
+
+
+    // ========================================================
+    // 获取逻辑点身份
+    //
+    // pointId:
+    //     表格第 0 列
+    //
+    // taskId:
+    //     第 0 列 Qt::UserRole
+    // ========================================================
+
+    const int pointId =
+        idItem->text().toInt();
+
+    const int taskId =
+        idItem->data(
+            Qt::UserRole
+        ).toInt();
+
+    const QString name =
+        nameItem->text();
+
+
+    if (
+        taskId <= 0 ||
+        pointId <= 0
+    )
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("解除强制失败"),
+            QStringLiteral(
+                "当前点缺少有效的 Modbus 任务ID或点ID"
+            )
+        );
+
+        return;
+    }
+
+
+    // ========================================================
+    // 再确认一次
+    // ========================================================
+
+    if (
+        QMessageBox::question(
+            this,
+            QStringLiteral("确认解除强制"),
+            QStringLiteral(
+                "确定解除点“%1”的强制状态吗？\n\n"
+                "解除后，该点将恢复显示真实 Modbus 采集值。"
+            ).arg(
+                name
+            ),
+            QMessageBox::Yes |
+            QMessageBox::No,
+            QMessageBox::No
+        )
+        !=
+        QMessageBox::Yes
+    )
+    {
+        return;
+    }
+
+
+    // ========================================================
+    // 发送 MSG_RELEASE_FORCE = 4
+    //
+    // payload:
+    //
+    // {
+    //     "taskId": 1,
+    //     "pointId": 1
+    // }
+    // ========================================================
+
+    QString error;
+
+    const QJsonObject response =
+        modbusServerClient_.request(
+            4,
+            modbusRequestId_,
+            &error,
+            QJsonObject{
+                {
+                    QStringLiteral("taskId"),
+                    taskId
+                },
+                {
+                    QStringLiteral("pointId"),
+                    pointId
+                }
+            }
+        );
+
+
+    // ========================================================
+    // 检查返回
+    // ========================================================
+
+    if (
+        !response.value(
+            QStringLiteral("ok")
+        ).toBool()
+    )
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("解除强制失败"),
+            response.value(
+                QStringLiteral("message")
+            ).toString(
+                response.value(
+                    QStringLiteral("error")
+                ).toString(
+                    error
+                )
+            )
+        );
+
+        return;
+    }
+
+
+    // ========================================================
+    // 成功
+    // ========================================================
+
+    statusBar()->showMessage(
+        QStringLiteral(
+            "已解除 Modbus 点 %1 的强制状态"
+        ).arg(
+            name
+        ),
+        4000
+    );
+
+
+    // ========================================================
+    // 立即重新读取 Snapshot
+    //
+    // 注意：
+    // 如果刚解除时下一轮 Modbus 采集尚未发生，
+    // value 有可能短暂保留原强制值。
+    //
+    // 随后正常采集周期到达后，
+    // 实际值会自动恢复。
+    // ========================================================
+
+    pollModbusServer();
+}
 
     void forceOnlineValue(int row)
+{
+    if (
+        !onlineTable_ ||
+        row < 0 ||
+        row >= onlineTable_->rowCount()
+    )
     {
-        if (!onlineTable_ || row < 0 || row >= onlineTable_->rowCount()) return;
-        const QString pointId =
-    onlineTable_->item(row, 0)->text();
+        return;
+    }
 
-const QString name =
-    onlineTable_->item(row, 1)->text();
 
-const QString type =
-    onlineTable_->item(row, 5)->text();
+    // =========================================================
+    // Modbus 工程
+    // =========================================================
 
-const QString oldValue =
-    onlineTable_->item(row, 6)->text();
-        bool accepted = false;
-        const QString value = QInputDialog::getText(this, QStringLiteral("强制点值"),
-            QStringLiteral("点：%1（%2）\n输入强制值：").arg(name, type), QLineEdit::Normal,
-            oldValue, &accepted).trimmed();
-        if (!accepted || value.isEmpty()) return;
-        if (QMessageBox::warning(this, QStringLiteral("确认强制"),
-                QStringLiteral("将通过 system-managerd 修改共享内存中的点值：\n%1 = %2\n\n该操作会写入运行日志。")
-                    .arg(name, value), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
-            return;
-        QString error;
-        const QJsonObject response = queryManager(3, &error, QJsonObject{
-            {QStringLiteral("pointId"), pointId.toInt()},
-            {QStringLiteral("value"), value},
-            {QStringLiteral("configHash"), currentConfigHash()}
-        });
-        if (!response.value(QStringLiteral("ok")).toBool()) {
-            QMessageBox::critical(this, QStringLiteral("强制失败"),
-                response.value(QStringLiteral("message")).toString(
-                    response.value(QStringLiteral("error")).toString(error)));
+    if (
+        currentCommunicationType_ ==
+        QStringLiteral("modbus")
+    )
+    {
+        QTableWidgetItem *idItem =
+            onlineTable_->item(row, 0);
+
+        QTableWidgetItem *nameItem =
+            onlineTable_->item(row, 1);
+
+        QTableWidgetItem *typeItem =
+            onlineTable_->item(row, 5);
+
+        QTableWidgetItem *valueItem =
+            onlineTable_->item(row, 7);
+
+        QTableWidgetItem *directionItem =
+            onlineTable_->item(row, 4);
+
+
+        if (
+            !idItem ||
+            !nameItem ||
+            !typeItem ||
+            !valueItem ||
+            !directionItem
+        )
+        {
+            QMessageBox::critical(
+                this,
+                QStringLiteral("操作失败"),
+                QStringLiteral("当前点数据不完整")
+            );
+
             return;
         }
-        statusBar()->showMessage(QStringLiteral("已强制 %1 = %2").arg(name, value), 4000);
-        pollManager();
+
+
+        const int pointId =
+            idItem->text().toInt();
+
+        const int taskId =
+            idItem->data(
+                Qt::UserRole
+            ).toInt();
+
+
+        if (
+            taskId <= 0 ||
+            pointId <= 0
+        )
+        {
+            QMessageBox::critical(
+                this,
+                QStringLiteral("强制失败"),
+                QStringLiteral(
+                    "当前点缺少有效的 Modbus 任务ID或点ID"
+                )
+            );
+
+            return;
+        }
+
+
+        const QString name =
+            nameItem->text();
+
+        const QString type =
+            typeItem->text();
+
+        const QString oldValue =
+            valueItem->text();
+
+        const bool isOutput =
+            directionItem->text() == QStringLiteral("OUTPUT");
+
+
+        // -----------------------------------------------------
+        // 输入强制值
+        // -----------------------------------------------------
+
+        bool accepted = false;
+
+        const QString value =
+            QInputDialog::getText(
+                this,
+                isOutput
+                    ? QStringLiteral("写入 Modbus 设备")
+                    : QStringLiteral("强制点值"),
+                QStringLiteral(
+                    "点：%1（%2）\n%3："
+                ).arg(
+                    name,
+                    type,
+                    isOutput
+                        ? QStringLiteral("输入设备输出值")
+                        : QStringLiteral("输入强制值")
+                ),
+                QLineEdit::Normal,
+                oldValue,
+                &accepted
+            ).trimmed();
+
+
+        if (
+            !accepted ||
+            value.isEmpty()
+        )
+        {
+            return;
+        }
+
+
+        // -----------------------------------------------------
+        // 确认
+        // -----------------------------------------------------
+
+        if (
+            QMessageBox::warning(
+                this,
+                isOutput
+                    ? QStringLiteral("确认写入设备")
+                    : QStringLiteral("确认强制"),
+                isOutput
+                    ? QStringLiteral(
+                        "即将向真实 Modbus 设备写入：\n"
+                        "%1 = %2\n\n"
+                        "该操作会立即改变设备寄存器，请确认现场设备状态安全。"
+                      ).arg(name, value)
+                    : QStringLiteral(
+                        "将强制 Modbus 逻辑点的显示值：\n"
+                        "%1 = %2\n\n"
+                        "该操作仅修改共享内存中的逻辑值。"
+                      ).arg(name, value),
+                QMessageBox::Yes |
+                QMessageBox::No,
+                QMessageBox::No
+            )
+            != QMessageBox::Yes
+        )
+        {
+            return;
+        }
+
+
+        // -----------------------------------------------------
+        // 发送 MSG_FORCE_VALUE = 3
+        //
+        // ModbusServer:
+        //     127.0.0.1:19091
+        // -----------------------------------------------------
+
+        QString error;
+
+        const QJsonObject response =
+            modbusServerClient_.request(
+                3,
+                modbusRequestId_,
+                &error,
+                QJsonObject{
+                    {
+                        QStringLiteral("taskId"),
+                        taskId
+                    },
+                    {
+                        QStringLiteral("pointId"),
+                        pointId
+                    },
+                    {
+                        QStringLiteral("name"),
+                        name
+                    },
+                    {
+                        QStringLiteral("value"),
+                        value
+                    }
+                }
+            );
+
+
+        if (
+            !response.value(
+                QStringLiteral("ok")
+            ).toBool()
+        )
+        {
+            QMessageBox::critical(
+                this,
+                isOutput
+                    ? QStringLiteral("写入设备失败")
+                    : QStringLiteral("强制失败"),
+                response.value(
+                    QStringLiteral("message")
+                ).toString(
+                    response.value(
+                        QStringLiteral("error")
+                    ).toString(
+                        error
+                    )
+                )
+            );
+
+            return;
+        }
+
+
+        statusBar()->showMessage(
+            (isOutput
+                ? QStringLiteral("已写入 Modbus 设备 %1 = %2")
+                : QStringLiteral("已强制 Modbus 逻辑点 %1 = %2"))
+            .arg(
+                name,
+                value
+            ),
+            4000
+        );
+
+
+        // 强制完成后立即重新读取
+        pollModbusServer();
+
+        return;
     }
+
+
+    // =========================================================
+    // Python 工程
+    //
+    // 保持原来的 system-managerd 强制逻辑
+    // =========================================================
+
+    const QString pointId =
+        onlineTable_->item(
+            row,
+            0
+        )->text();
+
+
+    const QString name =
+        onlineTable_->item(
+            row,
+            1
+        )->text();
+
+
+    const QString type =
+        onlineTable_->item(
+            row,
+            5
+        )->text();
+
+
+    const QString oldValue =
+        onlineTable_->item(
+            row,
+            6
+        )->text();
+
+
+    bool accepted = false;
+
+
+    const QString value =
+        QInputDialog::getText(
+            this,
+            QStringLiteral("强制点值"),
+            QStringLiteral(
+                "点：%1（%2）\n输入强制值："
+            ).arg(
+                name,
+                type
+            ),
+            QLineEdit::Normal,
+            oldValue,
+            &accepted
+        ).trimmed();
+
+
+    if (
+        !accepted ||
+        value.isEmpty()
+    )
+    {
+        return;
+    }
+
+
+    if (
+        QMessageBox::warning(
+            this,
+            QStringLiteral("确认强制"),
+            QStringLiteral(
+                "将通过 system-managerd 修改共享内存中的点值：\n"
+                "%1 = %2\n\n"
+                "该操作会写入运行日志。"
+            ).arg(
+                name,
+                value
+            ),
+            QMessageBox::Yes |
+            QMessageBox::No,
+            QMessageBox::No
+        )
+        != QMessageBox::Yes
+    )
+    {
+        return;
+    }
+
+
+    QString error;
+
+
+    const QJsonObject response =
+        queryManager(
+            3,
+            &error,
+            QJsonObject{
+                {
+                    QStringLiteral("pointId"),
+                    pointId.toInt()
+                },
+                {
+                    QStringLiteral("value"),
+                    value
+                },
+                {
+                    QStringLiteral("configHash"),
+                    currentConfigHash()
+                }
+            }
+        );
+
+
+    if (
+        !response.value(
+            QStringLiteral("ok")
+        ).toBool()
+    )
+    {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("强制失败"),
+            response.value(
+                QStringLiteral("message")
+            ).toString(
+                response.value(
+                    QStringLiteral("error")
+                ).toString(
+                    error
+                )
+            )
+        );
+
+        return;
+    }
+
+
+    statusBar()->showMessage(
+        QStringLiteral(
+            "已强制 %1 = %2"
+        ).arg(
+            name,
+            value
+        ),
+        4000
+    );
+
+
+    pollManager();
+}
 
     void showOnlineData()
 {
@@ -1995,7 +8267,7 @@ const QString oldValue =
             tabs_->setCurrentIndex(index);
 
             if (currentCommunicationType_ == QStringLiteral("modbus"))
-                pollModbusSharedMemory();
+                pollModbusServer();
             else
                 pollManager();
 
@@ -2017,9 +8289,64 @@ const QString oldValue =
     );
 
     if (currentCommunicationType_ == QStringLiteral("modbus"))
-        pollModbusSharedMemory();
+        pollModbusServer();
     else
         pollManager();
+}
+
+void showModbusPoints()
+{
+    // =========================================================
+    // 如果已经打开，就直接切换过去
+    // =========================================================
+
+    for (
+        int index = 0;
+        index < tabs_->count();
+        ++index
+    )
+    {
+        if (
+            tabs_->tabText(index)
+            ==
+            QStringLiteral("Modbus 点表")
+        )
+        {
+            tabs_->setCurrentIndex(
+                index
+            );
+
+            // 每次重新点击左侧“点表”时重新读取数据库
+            loadModbusPointsTable();
+
+            return;
+        }
+    }
+
+
+    // =========================================================
+    // 创建页面
+    // =========================================================
+
+    QWidget *page =
+    createModbusPointsPage();
+
+    // 从 modbus_config.db 加载现有点
+    loadModbusPointsTable();
+
+    const int index =
+        tabs_->addTab(
+            page,
+            pixelIcon(
+                QColor("#008080"),
+                1
+            ),
+            QStringLiteral("Modbus 点表")
+        );
+
+    tabs_->setCurrentIndex(
+        index
+    );
 }
 
     void showOverview()
@@ -2049,315 +8376,14 @@ const QString oldValue =
         tabs_->setCurrentIndex(index);
     }
 
-void pollModbusSharedMemory()
-{
-    if (!onlineTable_)
-        return;
 
-
-    // =========================================================
-    // 从 ModbusCollector 读取共享内存
-    // =========================================================
-
-    QVector<ModbusSharedVariable> variables;
-
-    QString error;
-
-
-    if (!modbusSharedMemoryReader_.read(
-            variables,
-            &error))
-    {
-        statusBar()->showMessage(
-            QStringLiteral(
-                "Modbus共享内存未连接：%1"
-            ).arg(error)
-        );
-
-        return;
-    }
-
-
-    // =========================================================
-    // 更新在线数据表
-    // =========================================================
-
-    onlineTable_->setRowCount(
-        variables.size()
-    );
-
-
-    for (int row = 0;
-         row < variables.size();
-         ++row)
-    {
-        const auto &var =
-            variables.at(row);
-
-
-        // =====================================================
-        // 点ID
-        // =====================================================
-
-        onlineTable_->setItem(
-            row,
-            0,
-            new QTableWidgetItem(
-                QString::number(row + 1)
-            )
-        );
-
-
-        // =====================================================
-        // 点名
-        // =====================================================
-
-        onlineTable_->setItem(
-            row,
-            1,
-            new QTableWidgetItem(
-                var.name
-            )
-        );
-
-
-        // =====================================================
-        // Slave ID
-        // =====================================================
-
-        onlineTable_->setItem(
-            row,
-            2,
-            new QTableWidgetItem(
-                QString::number(
-                    var.slave
-                )
-            )
-        );
-
-
-        // =====================================================
-        // Modbus 功能码
-        // =====================================================
-
-        QString functionText =
-            QStringLiteral(
-                "%1"
-            ).arg(var.function);
-
-
-        // 给常见功能码增加说明
-        if (var.function == 1)
-        {
-            functionText =
-                QStringLiteral("01 (Read Coils)");
-        }
-        else if (var.function == 2)
-        {
-            functionText =
-                QStringLiteral("02 (Read Discrete Inputs)");
-        }
-        else if (var.function == 3)
-        {
-            functionText =
-                QStringLiteral("03 (Read Holding Registers)");
-        }
-        else if (var.function == 4)
-        {
-            functionText =
-                QStringLiteral("04 (Read Input Registers)");
-        }
-
-
-        onlineTable_->setItem(
-            row,
-            3,
-            new QTableWidgetItem(
-                functionText
-            )
-        );
-
-
-        // =====================================================
-        // Modbus 地址
-        // =====================================================
-
-        onlineTable_->setItem(
-            row,
-            4,
-            new QTableWidgetItem(
-                QString::number(
-                    var.address
-                )
-            )
-        );
-
-
-        // =====================================================
-        // 数据类型
-        // =====================================================
-
-        onlineTable_->setItem(
-            row,
-            5,
-            new QTableWidgetItem(
-                var.datatype
-            )
-        );
-
-
-        // =====================================================
-        // 实时值
-        // =====================================================
-
-        QString valueText;
-
-        if (
-            var.datatype.compare(
-                QStringLiteral("UINT16"),
-                Qt::CaseInsensitive
-            ) == 0 ||
-            var.datatype.compare(
-                QStringLiteral("INT16"),
-                Qt::CaseInsensitive
-            ) == 0
-        )
-        {
-            valueText =
-                QString::number(
-                    var.value,
-                    'f',
-                    0
-                );
-        }
-        else
-        {
-            valueText =
-                QString::number(
-                    var.value,
-                    'f',
-                    6
-                );
-        }
-
-
-        auto *valueItem =
-            new QTableWidgetItem(
-                valueText
-            );
-
-        valueItem->setTextAlignment(
-            Qt::AlignRight |
-            Qt::AlignVCenter
-        );
-
-        onlineTable_->setItem(
-            row,
-            6,
-            valueItem
-        );
-
-
-        // =====================================================
-        // 通信质量
-        // =====================================================
-
-        const bool good =
-            (var.status == 0);
-
-
-        auto *statusItem =
-            new QTableWidgetItem(
-                good
-                    ? QStringLiteral("Good")
-                    : QStringLiteral("Bad")
-            );
-
-
-        statusItem->setTextAlignment(
-            Qt::AlignCenter
-        );
-
-
-        statusItem->setForeground(
-            good
-                ? QColor("#008000")
-                : QColor("#c00000")
-        );
-
-
-        onlineTable_->setItem(
-            row,
-            7,
-            statusItem
-        );
-
-
-        // =====================================================
-        // 采集时间
-        // =====================================================
-
-        onlineTable_->setItem(
-            row,
-            8,
-            new QTableWidgetItem(
-                var.timestamp
-            )
-        );
-
-
-        // =====================================================
-        // Modbus 原始报文
-        //
-        // 这里显示 ModbusCollector 保存的 telegram
-        //
-        // 例如：
-        //
-        // TX:
-        // 00 01 00 00 00 06 01 03 00 00 00 01
-        //
-        // RX:
-        // 00 01 00 00 00 05 01 03 02 30 39
-        // =====================================================
-
-        auto *telegramItem =
-            new QTableWidgetItem(
-                var.telegram
-            );
-
-
-        telegramItem->setToolTip(
-            var.telegram
-        );
-
-
-        onlineTable_->setItem(
-            row,
-            9,
-            telegramItem
-        );
-    }
-
-
-    // =========================================================
-    // 状态栏
-    // =========================================================
-
-    statusBar()->showMessage(
-        QStringLiteral(
-            "ModbusCollector：已读取 %1 个变量"
-        ).arg(
-            variables.size()
-        )
-    );
-}
 
 
 
     void pollManager()
 {
     // =========================================================
-    // Modbus 工程使用 ModbusCollector + POSIX Shared Memory
+    // Modbus 工程使用 ModbusCollector + ModbusServer TCP
     // 不使用 system-managerd 的实时数据 Snapshot
     // =========================================================
 
@@ -2750,9 +8776,16 @@ void pollModbusSharedMemory()
 }
 
     void pollPythonDebug()
-    {
-        if (!frames_ && !overview_) return;
-        int runningCount = 0;
+{
+    // Modbus 工程不使用 Python Runner 状态刷新，
+    // 防止把 Modbus 系统总览的 1 / 1 覆盖成 0 / 0。
+    if (currentCommunicationType_ == QStringLiteral("modbus"))
+        return;
+
+    if (!frames_ && !overview_)
+        return;
+
+    int runningCount = 0;
         for (auto task = debugTasks_.cbegin(); task != debugTasks_.cend(); ++task) {
             const qlonglong taskId = task.key();
             const quint16 port = static_cast<quint16>(20000 + (taskId % 40000));
@@ -2782,6 +8815,77 @@ void pollModbusSharedMemory()
         }
         if (taskSummary_)
             taskSummary_->setText(QStringLiteral("%1 / %2").arg(runningCount).arg(debugTasks_.size()));
+    }
+
+    void pollRuntimeLog()
+    {
+        if (!runtimeLog_)
+            return;
+
+        if (currentProjectDirectory_.isEmpty())
+            return;
+
+        const QString logPath =
+            QDir(currentProjectDirectory_)
+                .filePath(QStringLiteral("run/runtime.log"));
+
+        QFile file(logPath);
+
+        if (!file.exists())
+            return;
+
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+            return;
+
+        const qint64 fileSize = file.size();
+
+        // 如果日志文件被清空、重新创建或截断，则从头开始读取
+        if (fileSize < runtimeLogOffset_)
+        {
+            runtimeLogOffset_ = 0;
+            runtimeLogPending_.clear();
+            runtimeLog_->clear();
+        }
+
+        if (!file.seek(runtimeLogOffset_))
+            return;
+
+        const QByteArray data = file.readAll();
+
+        runtimeLogOffset_ = file.pos();
+
+        if (data.isEmpty())
+            return;
+
+        runtimeLogPending_ += QString::fromUtf8(data);
+
+        // 按行处理，保留最后一段不完整的日志
+        const QStringList lines =
+            runtimeLogPending_.split(
+                QRegularExpression(QStringLiteral("[\\r\\n]+")),
+                Qt::KeepEmptyParts
+            );
+
+        if (lines.isEmpty())
+            return;
+
+        // 最后一段可能还没有写完，暂时保留
+        runtimeLogPending_ = lines.last();
+
+        for (int i = 0; i < lines.size() - 1; ++i)
+        {
+            const QString line = lines.at(i);
+
+            if (line.isEmpty())
+                continue;
+
+            runtimeLog_->appendPlainText(line);
+        }
+
+        // 自动滚动到底部
+        QTextCursor cursor = runtimeLog_->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        runtimeLog_->setTextCursor(cursor);
     }
 
     void setTaskRuntimeState(qlonglong taskId, bool running, quint16 port)
@@ -2828,6 +8932,1472 @@ void pollModbusSharedMemory()
         }
         while (frames_->rowCount() > 500) frames_->removeRow(frames_->rowCount() - 1);
     }
+
+void appendModbusFrame(
+    const QString &timestamp,
+    const QString &pointName,
+    const QString &direction,
+    const QString &telegram
+)
+{
+    if (!frames_ || framePaused_)
+        return;
+
+    if (telegram.trimmed().isEmpty())
+        return;
+
+    // ---------------------------------------------------------
+    // 时间
+    // ---------------------------------------------------------
+
+    QString displayTime = timestamp;
+
+    const QDateTime dateTime =
+        QDateTime::fromString(
+            timestamp,
+            QStringLiteral("yyyy-MM-dd HH:mm:ss")
+        );
+
+    if (dateTime.isValid())
+    {
+        displayTime =
+            dateTime.toString(
+                QStringLiteral("HH:mm:ss")
+            );
+    }
+
+    // ---------------------------------------------------------
+    // 计算真实报文字节数
+    //
+    // telegram 格式：
+    // 00 01 00 00 00 06 01 03 ...
+    // ---------------------------------------------------------
+
+    const QStringList bytes =
+        telegram.split(
+            QChar(' '),
+            Qt::SkipEmptyParts
+        );
+
+    const int byteLength =
+        bytes.size();
+
+    // ---------------------------------------------------------
+    // 插入最上面
+    // ---------------------------------------------------------
+
+    frames_->insertRow(0);
+
+    const QStringList values = {
+        displayTime,
+        QStringLiteral("MODBUS"),
+        pointName,
+        telegram,
+        QString::number(byteLength),
+        direction
+    };
+
+    for (
+        int column = 0;
+        column < values.size();
+        ++column
+    )
+    {
+        frames_->setItem(
+            0,
+            column,
+            new QTableWidgetItem(
+                values[column]
+            )
+        );
+    }
+
+    // 完整报文放进 UserRole，供下面详情框查看
+    frames_->item(0, 3)->setData(
+        Qt::UserRole,
+        telegram
+    );
+
+    frames_->item(0, 3)->setToolTip(
+        QStringLiteral("单击查看完整 Modbus TCP 报文")
+    );
+
+    // ---------------------------------------------------------
+    // 颜色
+    // TX = 蓝色
+    // RX = 绿色
+    // ---------------------------------------------------------
+
+    if (direction == QStringLiteral("TX"))
+    {
+        frames_->item(0, 1)->setForeground(
+            QColor("#0000c0")
+        );
+
+        frames_->item(0, 5)->setForeground(
+            QColor("#0000c0")
+        );
+    }
+    else if (direction == QStringLiteral("RX"))
+    {
+        frames_->item(0, 1)->setForeground(
+            QColor("#008000")
+        );
+
+        frames_->item(0, 5)->setForeground(
+            QColor("#008000")
+        );
+    }
+
+    // 最多保留 500 条
+    while (frames_->rowCount() > 500)
+    {
+        frames_->removeRow(
+            frames_->rowCount() - 1
+        );
+    }
+}
+
+void pollModbusServer()
+{
+    if (!onlineTable_)
+        return;
+
+
+    QString error;
+
+
+    // =========================================================
+    // 通过 TCP 19091 向 ModbusCollector 请求 SNAPSHOT
+    // =========================================================
+
+    const QJsonObject response =
+        modbusServerClient_.request(
+            2,                  // MSG_SNAPSHOT
+            modbusRequestId_,
+            &error
+        );
+
+
+if (response.isEmpty())
+{
+    // =====================================================
+    // ModbusServer TCP 已断开
+    //
+    // 注意：
+    // 不清空最后一次采集到的值。
+    // 保留点名、地址、实时值、采集时间等最后快照，
+    // 但是所有点的质量必须立即变为 BAD。
+    // =====================================================
+
+    for (
+        int row = 0;
+        row < onlineTable_->rowCount();
+        ++row
+    )
+    {
+        QTableWidgetItem *idItem =
+            onlineTable_->item(
+                row,
+                0
+            );
+
+
+        if (!idItem)
+        {
+            continue;
+        }
+
+
+        // -------------------------------------------------
+        // 跳过 Modbus 任务标题行
+        // -------------------------------------------------
+
+        if (
+            idItem->data(
+                Qt::UserRole + 1
+            ).toString()
+            ==
+            QStringLiteral("task_header")
+        )
+        {
+            continue;
+        }
+
+
+        // -------------------------------------------------
+        // 普通点：质量改成 BAD
+        // -------------------------------------------------
+
+        QTableWidgetItem *qualityItem =
+            onlineTable_->item(
+                row,
+                8
+            );
+
+
+        if (!qualityItem)
+        {
+            qualityItem =
+                new QTableWidgetItem;
+
+            onlineTable_->setItem(
+                row,
+                8,
+                qualityItem
+            );
+        }
+
+
+        qualityItem->setText(
+            QStringLiteral("BAD")
+        );
+
+        qualityItem->setTextAlignment(
+            Qt::AlignCenter
+        );
+
+        qualityItem->setForeground(
+            QBrush(
+                QColor("#c00000")
+            )
+        );
+
+
+        QFont qualityFont =
+            qualityItem->font();
+
+        qualityFont.setBold(
+            true
+        );
+
+        qualityItem->setFont(
+            qualityFont
+        );
+    }
+
+
+    // =====================================================
+    // 系统总览改为通信异常
+    // =====================================================
+
+    if (
+        currentCommunicationType_
+            == QStringLiteral("modbus")
+        &&
+        overview_
+    )
+    {
+        for (
+            int row = 0;
+            row < overview_->rowCount();
+            ++row
+        )
+        {
+            QTableWidgetItem *channelItem =
+                overview_->item(
+                    row,
+                    1
+                );
+
+
+            if (
+                !channelItem
+                ||
+                channelItem->text()
+                    != QStringLiteral("Modbus 通信")
+            )
+            {
+                continue;
+            }
+
+
+            // ---------------------------------------------
+            // 状态
+            // ---------------------------------------------
+
+            if (
+                overview_->item(
+                    row,
+                    0
+                )
+            )
+            {
+                overview_->item(
+                    row,
+                    0
+                )->setText(
+                    QStringLiteral("● 异常")
+                );
+
+                overview_->item(
+                    row,
+                    0
+                )->setForeground(
+                    QColor("#c00000")
+                );
+            }
+
+
+            // ---------------------------------------------
+            // 成功率
+            // ---------------------------------------------
+
+            if (
+                overview_->item(
+                    row,
+                    5
+                )
+            )
+            {
+                overview_->item(
+                    row,
+                    5
+                )->setText(
+                    QStringLiteral("0.0%")
+                );
+
+                overview_->item(
+                    row,
+                    5
+                )->setForeground(
+                    QColor("#c00000")
+                );
+            }
+
+
+            // ---------------------------------------------
+            // 响应
+            // ---------------------------------------------
+
+            if (
+                overview_->item(
+                    row,
+                    6
+                )
+            )
+            {
+                overview_->item(
+                    row,
+                    6
+                )->setText(
+                    QStringLiteral(
+                        "ModbusServer 未连接"
+                    )
+                );
+
+                overview_->item(
+                    row,
+                    6
+                )->setForeground(
+                    QColor("#c00000")
+                );
+            }
+
+
+            break;
+        }
+    }
+
+
+    // =====================================================
+    // 状态栏保留具体 TCP 错误
+    // =====================================================
+
+    statusBar()->showMessage(
+        QStringLiteral(
+            "ModbusServer 未连接：%1"
+        ).arg(error)
+    );
+
+
+    return;
+}
+
+
+    // =========================================================
+    // 检查服务器返回 ok
+    // =========================================================
+
+    if (
+        !response.value(
+            QStringLiteral("ok")
+        ).toBool()
+    )
+    {
+        statusBar()->showMessage(
+            QStringLiteral(
+                "ModbusServer 返回错误：%1"
+            )
+            .arg(
+                response.value(
+                    QStringLiteral("error")
+                ).toString()
+            )
+        );
+
+        return;
+    }
+
+    // =========================================================
+    // 获取 Modbus 任务配置
+    //
+    // tasks:
+    //     ModbusCollector Snapshot 返回的任务配置
+    //
+    // variables:
+    //     当前实时变量快照
+    // =========================================================
+
+    const QJsonArray tasks =
+        response.value(
+            QStringLiteral("tasks")
+        ).toArray();
+
+    // =========================================================
+    // 获取 variables
+    // =========================================================
+
+    const QJsonArray variables =
+        response.value(
+            QStringLiteral("variables")
+        ).toArray();
+
+// =========================================================
+// 更新 Modbus 系统总览
+// =========================================================
+
+if (
+    currentCommunicationType_ == QStringLiteral("modbus")
+    &&
+    overview_
+)
+{
+    // -----------------------------------------------------
+    // 如果总览中还没有 Modbus 行，则创建
+    // -----------------------------------------------------
+
+    int modbusRow = -1;
+
+    for (int row = 0; row < overview_->rowCount(); ++row)
+    {
+        QTableWidgetItem *channel =
+            overview_->item(row, 1);
+
+        if (
+            channel
+            &&
+            channel->text() == QStringLiteral("Modbus 通信")
+        )
+        {
+            modbusRow = row;
+            break;
+        }
+    }
+
+    if (modbusRow < 0)
+    {
+        modbusRow = overview_->rowCount();
+        overview_->insertRow(modbusRow);
+
+        const QStringList values = {
+            QStringLiteral("● 运行"),
+            QStringLiteral("Modbus 通信"),
+            QStringLiteral("Modbus TCP / 主站"),
+            QStringLiteral("127.0.0.1:502"),
+            QStringLiteral("0 / 0"),
+            QStringLiteral("--"),
+            QStringLiteral("运行正常")
+        };
+
+        for (int column = 0; column < values.size(); ++column)
+        {
+            overview_->setItem(
+                modbusRow,
+                column,
+                new QTableWidgetItem(values[column])
+            );
+        }
+    }
+
+
+    // -----------------------------------------------------
+    // 状态
+    // -----------------------------------------------------
+
+    overview_->item(
+        modbusRow,
+        0
+    )->setText(
+        QStringLiteral("● 运行")
+    );
+
+    overview_->item(
+        modbusRow,
+        0
+    )->setForeground(
+        QColor("#008000")
+    );
+
+
+    // -----------------------------------------------------
+    // 通道
+    // -----------------------------------------------------
+
+    overview_->item(
+        modbusRow,
+        1
+    )->setText(
+        QStringLiteral("Modbus 通信")
+    );
+
+
+    // -----------------------------------------------------
+    // 协议 / 角色
+    // -----------------------------------------------------
+
+    overview_->item(
+        modbusRow,
+        2
+    )->setText(
+        QStringLiteral("Modbus TCP / 主站")
+    );
+
+
+    // -----------------------------------------------------
+    // 对端
+    //
+    // 注意：
+    // 这里显示的是实际 Modbus 设备 :502，
+    // 不是 Qt -> ModbusServer 的 :19091
+    // -----------------------------------------------------
+
+    overview_->item(
+        modbusRow,
+        3
+    )->setText(
+        QStringLiteral("127.0.0.1:502")
+    );
+
+
+    // -----------------------------------------------------
+    // 统计 GOOD 点
+    // -----------------------------------------------------
+
+    int goodCount = 0;
+
+    for (const QJsonValue &value : variables)
+    {
+        const QJsonObject var =
+            value.toObject();
+
+        if (
+            var.value(
+                QStringLiteral("status")
+            ).toInt() == 1
+        )
+        {
+            ++goodCount;
+        }
+    }
+
+
+    // -----------------------------------------------------
+    // 成功率
+    // -----------------------------------------------------
+
+    double successRate = 0.0;
+
+    if (!variables.isEmpty())
+    {
+        successRate =
+            100.0
+            * static_cast<double>(goodCount)
+            / static_cast<double>(variables.size());
+    }
+
+    overview_->item(
+        modbusRow,
+        5
+    )->setText(
+        QStringLiteral("%1%")
+        .arg(
+            successRate,
+            0,
+            'f',
+            1
+        )
+    );
+
+
+    if (goodCount == variables.size() && !variables.isEmpty())
+    {
+        overview_->item(
+            modbusRow,
+            5
+        )->setForeground(
+            QColor("#008000")
+        );
+
+        overview_->item(
+            modbusRow,
+            6
+        )->setText(
+            QStringLiteral("运行正常")
+        );
+
+        overview_->item(
+            modbusRow,
+            6
+        )->setForeground(
+            QColor("#008000")
+        );
+    }
+    else
+    {
+        overview_->item(
+            modbusRow,
+            5
+        )->setForeground(
+            QColor("#c00000")
+        );
+
+        overview_->item(
+            modbusRow,
+            6
+        )->setText(
+            QStringLiteral("存在通信异常")
+        );
+
+        overview_->item(
+            modbusRow,
+            6
+        )->setForeground(
+            QColor("#c00000")
+        );
+    }
+
+
+    // -----------------------------------------------------
+    // 底部统计
+    // -----------------------------------------------------
+
+    if (taskSummary_)
+    {
+        int enabledTaskCount = 0;
+
+        for (const QJsonValue &taskValue : tasks)
+        {
+            const QJsonObject task =
+                taskValue.toObject();
+
+            if (
+                task.value(
+                    QStringLiteral("enable")
+                ).toBool()
+            )
+            {
+                ++enabledTaskCount;
+            }
+        }
+
+
+        taskSummary_->setText(
+            QStringLiteral("%1 / %2")
+            .arg(enabledTaskCount)
+            .arg(tasks.size())
+        );
+    }
+
+    if (pointSummary_)
+    {
+        pointSummary_->setText(
+            QStringLiteral("%1 点")
+            .arg(variables.size())
+        );
+    }
+}
+
+    // =========================================================
+// Modbus 在线数据按任务分组显示
+//
+// 显示结构：
+//
+// Modbus任务1 | 127.0.0.1:502 | Slave 1 | 采集周期 1500 ms
+//     point 1
+//     point 2
+//
+// Modbus任务2 | 127.0.0.1:502 | Slave 1 | 采集周期 500 ms
+//     point 9
+//
+// 注意：
+// Qt 仍然每 500 ms 请求一次 Snapshot。
+// 这里显示的 period 是真正的 Modbus 任务采集周期。
+// =========================================================
+
+onlineTable_->clearContents();
+onlineTable_->setRowCount(0);
+
+
+// =========================================================
+// 按 tasks[] 的顺序显示任务
+// =========================================================
+
+for (
+    int taskIndex = 0;
+    taskIndex < tasks.size();
+    ++taskIndex
+)
+{
+    const QJsonObject task =
+        tasks.at(
+            taskIndex
+        ).toObject();
+
+
+    const int taskId =
+        task.value(
+            QStringLiteral("taskId")
+        ).toInt();
+
+    const QString taskName =
+        task.value(
+            QStringLiteral("name")
+        ).toString();
+
+    const QString taskHost =
+        task.value(
+            QStringLiteral("host")
+        ).toString();
+
+    const int taskPort =
+        task.value(
+            QStringLiteral("port")
+        ).toInt();
+
+    const int taskSlaveId =
+        task.value(
+            QStringLiteral("slaveId")
+        ).toInt();
+
+    const int taskPeriod =
+        task.value(
+            QStringLiteral("period")
+        ).toInt();
+
+    const bool taskEnable =
+        task.value(
+            QStringLiteral("enable")
+        ).toBool();
+
+
+    // -----------------------------------------------------
+    // 当前任务被禁用时不显示
+    // -----------------------------------------------------
+
+    if (!taskEnable)
+    {
+        continue;
+    }
+
+
+    // =====================================================
+    // 插入任务标题行
+    // =====================================================
+
+    const int headerRow =
+        onlineTable_->rowCount();
+
+    onlineTable_->insertRow(
+        headerRow
+    );
+
+
+    const QString headerText =
+        QStringLiteral(
+            "▼ %1    |    %2:%3    |    Slave %4"
+            "    |    采集周期 %5 ms"
+        )
+        .arg(taskName)
+        .arg(taskHost)
+        .arg(taskPort)
+        .arg(taskSlaveId)
+        .arg(taskPeriod);
+
+
+    auto *headerItem =
+        new QTableWidgetItem(
+            headerText
+        );
+
+
+    // -----------------------------------------------------
+    // 保存任务身份
+    // -----------------------------------------------------
+
+    headerItem->setData(
+        Qt::UserRole,
+        taskId
+    );
+
+    headerItem->setData(
+        Qt::UserRole + 1,
+        QStringLiteral("task_header")
+    );
+
+
+    // -----------------------------------------------------
+    // 标题字体
+    // -----------------------------------------------------
+
+    QFont headerFont =
+        headerItem->font();
+
+    headerFont.setBold(
+        true
+    );
+
+    headerItem->setFont(
+        headerFont
+    );
+
+
+    // -----------------------------------------------------
+    // 标题颜色
+    // -----------------------------------------------------
+
+    headerItem->setBackground(
+        QBrush(
+            QColor("#d8e8f8")
+        )
+    );
+
+    headerItem->setForeground(
+        QBrush(
+            QColor("#000080")
+        )
+    );
+
+
+    onlineTable_->setItem(
+        headerRow,
+        0,
+        headerItem
+    );
+
+
+    // 横跨全部 10 列
+    onlineTable_->setSpan(
+        headerRow,
+        0,
+        1,
+        10
+    );
+
+
+    onlineTable_->setRowHeight(
+        headerRow,
+        28
+    );
+
+
+    // =====================================================
+    // 找出属于当前 taskId 的所有变量
+    // =====================================================
+
+    for (
+        int variableIndex = 0;
+        variableIndex < variables.size();
+        ++variableIndex
+    )
+    {
+        const QJsonObject var =
+            variables.at(
+                variableIndex
+            ).toObject();
+
+
+        const int variableTaskId =
+            var.value(
+                QStringLiteral("taskId")
+            ).toInt();
+
+
+        if (
+            variableTaskId != taskId
+        )
+        {
+            continue;
+        }
+
+
+        // =================================================
+        // 新建点数据行
+        // =================================================
+
+        const int tableRow =
+            onlineTable_->rowCount();
+
+        onlineTable_->insertRow(
+            tableRow
+        );
+
+
+        // =================================================
+        // Modbus TX / RX 报文监视
+        // =================================================
+
+        if (
+            frames_
+            &&
+            !framePaused_
+        )
+        {
+            const QString pointName =
+                var.value(
+                    QStringLiteral("name")
+                ).toString();
+
+            const int framePointId =
+                var.value(
+                    QStringLiteral("pointId")
+                ).toInt();
+
+            const QString timestamp =
+                var.value(
+                    QStringLiteral("timestamp")
+                ).toString();
+
+            const QString txTelegram =
+                var.value(
+                    QStringLiteral("txTelegram")
+                ).toString();
+
+            const QString rxTelegram =
+                var.value(
+                    QStringLiteral("rxTelegram")
+                ).toString();
+
+
+            // ---------------------------------------------
+            // taskId + pointId 唯一标识一个 Modbus 点
+            // ---------------------------------------------
+
+            const QString monitorKey =
+                QStringLiteral("%1:%2")
+                .arg(taskId)
+                .arg(framePointId);
+
+
+            const QString frameKey =
+                timestamp
+                + QStringLiteral("|")
+                + txTelegram
+                + QStringLiteral("|")
+                + rxTelegram;
+
+
+            const QString oldKey =
+                lastModbusFrameKeys_.value(
+                    monitorKey
+                );
+
+
+            if (
+                !frameKey.isEmpty()
+                &&
+                frameKey != oldKey
+            )
+            {
+                lastModbusFrameKeys_.insert(
+                    monitorKey,
+                    frameKey
+                );
+
+
+                appendModbusFrame(
+                    timestamp,
+                    pointName,
+                    QStringLiteral("RX"),
+                    rxTelegram
+                );
+
+                appendModbusFrame(
+                    timestamp,
+                    pointName,
+                    QStringLiteral("TX"),
+                    txTelegram
+                );
+            }
+        }
+
+
+        // =================================================
+        // 点ID
+        //
+        // UserRole:
+        //     taskId
+        //
+        // UserRole + 1:
+        //     point
+        // =================================================
+
+        const int pointId =
+            var.value(
+                QStringLiteral("pointId")
+            ).toInt();
+
+
+        auto *idItem =
+            new QTableWidgetItem(
+                QString::number(
+                    pointId
+                )
+            );
+
+
+        idItem->setData(
+            Qt::UserRole,
+            taskId
+        );
+
+        idItem->setData(
+            Qt::UserRole + 1,
+            QStringLiteral("point")
+        );
+
+
+        onlineTable_->setItem(
+            tableRow,
+            0,
+            idItem
+        );
+
+
+        // =================================================
+        // 点名
+        // =================================================
+
+        onlineTable_->setItem(
+            tableRow,
+            1,
+            new QTableWidgetItem(
+                var.value(
+                    QStringLiteral("name")
+                ).toString()
+            )
+        );
+
+
+        // =================================================
+        // Slave ID
+        // =================================================
+
+        onlineTable_->setItem(
+            tableRow,
+            2,
+            new QTableWidgetItem(
+                QString::number(
+                    var.value(
+                        QStringLiteral("slave")
+                    ).toInt()
+                )
+            )
+        );
+
+
+        // =================================================
+        // 标准 Modbus 地址
+        // =================================================
+
+        const int function =
+            var.value(
+                QStringLiteral("function")
+            ).toInt();
+
+        const int rawAddress =
+            var.value(
+                QStringLiteral("address")
+            ).toInt();
+
+
+        QString modbusAddress;
+
+
+        if (
+            function == 1
+            ||
+            function == 5
+            ||
+            function == 15
+        )
+        {
+            modbusAddress =
+                QStringLiteral("%1")
+                .arg(
+                    rawAddress + 1,
+                    5,
+                    10,
+                    QChar('0')
+                );
+        }
+        else if (
+            function == 2
+        )
+        {
+            modbusAddress =
+                QString::number(
+                    10001
+                    +
+                    rawAddress
+                );
+        }
+        else if (
+            function == 3
+            ||
+            function == 6
+            ||
+            function == 16
+        )
+        {
+            modbusAddress =
+                QString::number(
+                    40001
+                    +
+                    rawAddress
+                );
+        }
+        else if (
+            function == 4
+        )
+        {
+            modbusAddress =
+                QString::number(
+                    30001
+                    +
+                    rawAddress
+                );
+        }
+        else
+        {
+            modbusAddress =
+                QString::number(
+                    rawAddress
+                );
+        }
+
+
+        onlineTable_->setItem(
+            tableRow,
+            3,
+            new QTableWidgetItem(
+                modbusAddress
+            )
+        );
+
+
+        // =================================================
+        // 读写方向
+        // =================================================
+
+        const QString direction =
+            var.value(
+                QStringLiteral("direction")
+            ).toString();
+
+
+        onlineTable_->setItem(
+            tableRow,
+            4,
+            new QTableWidgetItem(
+                direction
+            )
+        );
+
+
+        // =================================================
+        // 数据类型
+        // =================================================
+
+        const QString datatype =
+            var.value(
+                QStringLiteral("datatype")
+            ).toString();
+
+
+        onlineTable_->setItem(
+            tableRow,
+            5,
+            new QTableWidgetItem(
+                datatype
+            )
+        );
+
+
+        // =================================================
+        // 大小端转换
+        // =================================================
+
+        const QString byteOrder =
+            var.value(
+                QStringLiteral("byteOrder")
+            ).toString();
+
+
+        onlineTable_->setItem(
+            tableRow,
+            6,
+            new QTableWidgetItem(
+                byteOrder
+            )
+        );
+
+
+        // =================================================
+        // 实时值
+        // =================================================
+
+        const double currentValue =
+            var.value(
+                QStringLiteral("value")
+            ).toDouble();
+
+
+        QString valueText;
+
+
+        if (
+            datatype.compare(
+                QStringLiteral("UINT16"),
+                Qt::CaseInsensitive
+            ) == 0
+            ||
+            datatype.compare(
+                QStringLiteral("INT16"),
+                Qt::CaseInsensitive
+            ) == 0
+            ||
+            datatype.compare(
+                QStringLiteral("UINT32"),
+                Qt::CaseInsensitive
+            ) == 0
+            ||
+            datatype.compare(
+                QStringLiteral("INT32"),
+                Qt::CaseInsensitive
+            ) == 0
+        )
+        {
+            valueText =
+                QString::number(
+                    currentValue,
+                    'f',
+                    0
+                );
+        }
+        else
+        {
+            valueText =
+                QString::number(
+                    currentValue,
+                    'f',
+                    6
+                );
+        }
+
+
+        auto *valueItem =
+            new QTableWidgetItem(
+                valueText
+            );
+
+
+        valueItem->setTextAlignment(
+            Qt::AlignRight
+            |
+            Qt::AlignVCenter
+        );
+
+
+        onlineTable_->setItem(
+            tableRow,
+            7,
+            valueItem
+        );
+
+
+        // =================================================
+        // 质量
+        //
+        // status:
+        //     1 = Modbus 通信正常
+        //     0 = Modbus 通信异常
+        //
+        // forced:
+        //     true  = 当前逻辑点被强制
+        //     false = 正常实时值
+        //
+        // 显示优先级：
+        //     FORCED > GOOD / BAD
+        // =================================================
+
+        const int status =
+            var.value(
+                QStringLiteral("status")
+            ).toInt();
+
+
+        const bool forced =
+            var.value(
+                QStringLiteral("forced")
+            ).toBool();
+
+        // =================================================
+        // 保存当前逻辑点的强制状态
+        //
+        // Qt::UserRole + 2:
+        //     false = 正常
+        //     true  = 强制
+        //
+        // 右键菜单通过这个状态决定是否显示“解除强制”。
+        // =================================================
+
+        if (
+            QTableWidgetItem *idItem =
+                onlineTable_->item(
+                    tableRow,
+                    0
+                )
+        )
+        {
+            idItem->setData(
+                Qt::UserRole + 2,
+                forced
+            );
+        }
+
+        QString quality;
+
+        if (forced)
+        {
+            quality =
+                QStringLiteral("FORCED");
+        }
+        else if (
+            status == 1
+        )
+        {
+            quality =
+                QStringLiteral("GOOD");
+        }
+        else
+        {
+            quality =
+                QStringLiteral("BAD");
+        }
+
+
+        auto *qualityItem =
+            new QTableWidgetItem(
+                quality
+            );
+
+
+        qualityItem->setTextAlignment(
+            Qt::AlignCenter
+        );
+
+
+        QFont qualityFont =
+            qualityItem->font();
+
+        qualityFont.setBold(
+            true
+        );
+
+        qualityItem->setFont(
+            qualityFont
+        );
+
+
+        // =================================================
+        // 质量颜色
+        //
+        // FORCED = 橙色
+        // GOOD   = 绿色
+        // BAD    = 红色
+        // =================================================
+
+        if (forced)
+        {
+            qualityItem->setForeground(
+                QBrush(
+                    QColor("#d07000")
+                )
+            );
+        }
+        else if (
+            status == 1
+        )
+        {
+            qualityItem->setForeground(
+                QBrush(
+                    QColor("#008000")
+                )
+            );
+        }
+        else
+        {
+            qualityItem->setForeground(
+                QBrush(
+                    QColor("#c00000")
+                )
+            );
+        }
+
+
+        onlineTable_->setItem(
+            tableRow,
+            8,
+            qualityItem
+        );
+
+
+        // =================================================
+        // 采集时间
+        // =================================================
+
+        const QString timestamp =
+            var.value(
+                QStringLiteral("timestamp")
+            ).toString();
+
+
+        onlineTable_->setItem(
+            tableRow,
+            9,
+            new QTableWidgetItem(
+                timestamp
+            )
+        );
+    }
+}
+
+
+    // =========================================================
+    // 状态栏
+    // =========================================================
+
+    statusBar()->showMessage(
+        QStringLiteral(
+            "ModbusServer TCP：已读取 %1 个变量"
+        )
+        .arg(
+            variables.size()
+        )
+    );
+}
+
 };
 
 } // namespace

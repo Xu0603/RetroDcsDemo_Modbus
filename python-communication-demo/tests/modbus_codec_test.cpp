@@ -590,6 +590,47 @@ void testInvalidRegisterCount() {
     std::cout << "[PASS] Invalid register count test\n";
 }
 
+void testEncodeRoundTrip() {
+    using namespace demo;
+
+    const std::vector<std::pair<DataType, Value>> values = {
+        {DataType::Bool, true},
+        {DataType::Int16, std::int16_t{-1234}},
+        {DataType::UInt16, std::uint16_t{0xABCD}},
+        {DataType::Int32, std::int32_t{-12345678}},
+        {DataType::UInt32, std::uint32_t{0x12345678}},
+        {DataType::Int64, std::int64_t{-1234567890123LL}},
+        {DataType::UInt64, std::uint64_t{0x123456789ABCDEF0ULL}},
+        {DataType::Float32, 123.25F},
+        {DataType::Float64, -9876.125}
+    };
+    const std::vector<ModbusByteOrder> orders = {
+        ModbusByteOrder::ABCD,
+        ModbusByteOrder::BADC,
+        ModbusByteOrder::CDAB,
+        ModbusByteOrder::DCBA
+    };
+
+    for (const auto &[type, expected] : values) {
+        for (const auto order : orders) {
+            const auto registers = encodeModbusRegisters(expected, type, order);
+            require(registers.size() == modbusRegisterCount(type),
+                    "encoded register count mismatch");
+            const auto actual = decodeModbusRegisters(registers, type, order);
+            require(actual == expected, "Modbus encode/decode round trip failed");
+        }
+    }
+
+    const auto registers = encodeModbusRegisters(
+        Value{std::uint32_t{0x12345678}},
+        DataType::UInt32,
+        ModbusByteOrder::ABCD);
+    require(registers == std::vector<std::uint16_t>({0x1234, 0x5678}),
+            "ABCD UINT32 encode failed");
+
+    std::cout << "[PASS] Encode round trip test\n";
+}
+
 } // namespace
 
 
@@ -632,6 +673,8 @@ int main() {
         testByteOrderDCBA32();
 
         testInvalidRegisterCount();
+
+        testEncodeRoundTrip();
 
         std::cout
             << "\nAll Modbus codec tests passed\n";

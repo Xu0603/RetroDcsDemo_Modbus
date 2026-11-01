@@ -37,6 +37,13 @@ public:
         int count
     );
 
+    void writeBit(int address, bool value);
+
+    void writeRegisters(
+        int address,
+        const std::vector<std::uint16_t> &registers
+    );
+
     const std::string &lastError() const;
 
 private:

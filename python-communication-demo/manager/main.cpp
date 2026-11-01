@@ -123,6 +123,7 @@ public:
 
       modbusManager_(
           config_.modbusDevices,
+          config_.points,
           shm_
       )
 {

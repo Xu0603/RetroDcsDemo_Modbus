@@ -201,6 +201,20 @@ T bytesToValue(
     return value;
 }
 
+template<typename T>
+std::vector<std::uint8_t> valueToBytes(const T &value) {
+    std::array<std::uint8_t, sizeof(T)> nativeBytes{};
+    std::memcpy(nativeBytes.data(), &value, sizeof(T));
+
+    std::vector<std::uint8_t> bytes(sizeof(T));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    std::reverse_copy(nativeBytes.begin(), nativeBytes.end(), bytes.begin());
+#else
+    std::copy(nativeBytes.begin(), nativeBytes.end(), bytes.begin());
+#endif
+    return bytes;
+}
+
 } // namespace
 
 
@@ -419,6 +433,58 @@ Value decodeModbusRegisters(
     throw std::runtime_error(
         "unsupported Modbus data type"
     );
+}
+
+
+std::vector<std::uint16_t> encodeModbusRegisters(
+    const Value &value,
+    DataType type,
+    ModbusByteOrder byteOrder
+) {
+    std::vector<std::uint8_t> bytes;
+
+    switch (type) {
+    case DataType::Bool:
+        bytes = valueToBytes<std::uint16_t>(
+            std::get<bool>(value) ? std::uint16_t{1} : std::uint16_t{0});
+        break;
+    case DataType::Int16:
+        bytes = valueToBytes(std::get<std::int16_t>(value));
+        break;
+    case DataType::UInt16:
+        bytes = valueToBytes(std::get<std::uint16_t>(value));
+        break;
+    case DataType::Int32:
+        bytes = valueToBytes(std::get<std::int32_t>(value));
+        break;
+    case DataType::UInt32:
+        bytes = valueToBytes(std::get<std::uint32_t>(value));
+        break;
+    case DataType::Int64:
+        bytes = valueToBytes(std::get<std::int64_t>(value));
+        break;
+    case DataType::UInt64:
+        bytes = valueToBytes(std::get<std::uint64_t>(value));
+        break;
+    case DataType::Float32:
+        bytes = valueToBytes(std::get<float>(value));
+        break;
+    case DataType::Float64:
+        bytes = valueToBytes(std::get<double>(value));
+        break;
+    }
+
+    // applyByteOrder is self-inverse for all supported permutations.
+    applyByteOrder(bytes, byteOrder);
+
+    std::vector<std::uint16_t> registers;
+    registers.reserve(bytes.size() / 2);
+    for (std::size_t i = 0; i < bytes.size(); i += 2) {
+        registers.push_back(static_cast<std::uint16_t>(
+            (static_cast<std::uint16_t>(bytes[i]) << 8) |
+            static_cast<std::uint16_t>(bytes[i + 1])));
+    }
+    return registers;
 }
 
 } // namespace demo

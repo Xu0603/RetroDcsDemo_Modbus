@@ -14,9 +14,9 @@ add_executable(retro_dcs_demo
     src/mainwindow.cpp
     src/retro_style.cpp
     src/manager_client.cpp
+    src/modbus_server_client.cpp
     src/project_metadata.cpp
     src/csv_utils.cpp
-    src/modbus_shared_memory_reader.cpp
 )
 
 target_link_libraries(retro_dcs_demo PRIVATE

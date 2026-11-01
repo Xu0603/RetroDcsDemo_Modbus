@@ -65,11 +65,15 @@ Value defaultValue(
 
 ModbusManager::ModbusManager(
     const std::vector<ModbusDeviceConfig> &devices,
+    const std::vector<PointConfig> &points,
     SharedMemoryManager &sharedMemory
 )
     :
     sharedMemory_(sharedMemory)
 {
+    for (const auto &point : points)
+        points_[point.id] = &point;
+
     for (
         const auto &device :
         devices
@@ -296,9 +300,48 @@ void ModbusManager::deviceLoop(
                 continue;
             }
 
+            const auto pointIt = points_.find(binding.pointId);
+            if (pointIt == points_.end())
+            {
+                std::cerr << "[Modbus] Binding references unknown point="
+                          << binding.pointId << std::endl;
+                continue;
+            }
+            const auto &point = *pointIt->second;
 
             try
             {
+                if (point.direction == "OUTPUT")
+                {
+                    const auto snapshot = sharedMemory_.read(binding.pointId);
+                    if (binding.dataType == DataType::Bool)
+                    {
+                        client.writeBit(
+                            static_cast<int>(binding.address),
+                            std::get<bool>(snapshot.value));
+                    }
+                    else
+                    {
+                        const auto registers = encodeModbusRegisters(
+                            snapshot.value, binding.dataType, binding.byteOrder);
+                        client.writeRegisters(
+                            static_cast<int>(binding.address), registers);
+                    }
+
+                    if (snapshot.status != PointStatus::Good)
+                        sharedMemory_.write(
+                            binding.pointId, snapshot.value, PointStatus::Good);
+
+                    std::cout << "[Modbus] " << config.name
+                              << " Output Point=" << binding.pointId
+                              << " Address=" << binding.address
+                              << " Value=" << valueToString(snapshot.value)
+                              << std::endl;
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(binding.periodMs));
+                    continue;
+                }
+
                 // ------------------------------------------------
                 // 当前阶段支持：
                 //
@@ -393,7 +436,9 @@ void ModbusManager::deviceLoop(
             )
             {
                 std::cerr
-                    << "[Modbus] Read failed"
+                    << "[Modbus] "
+                    << (point.direction == "OUTPUT" ? "Write" : "Read")
+                    << " failed"
                     << " device="
                     << config.name
                     << " point="
@@ -409,13 +454,19 @@ void ModbusManager::deviceLoop(
 
                 try
                 {
-                    sharedMemory_.write(
-                        binding.pointId,
-                        defaultValue(
-                            binding.dataType
-                        ),
-                        PointStatus::Bad
-                    );
+                    if (point.direction == "OUTPUT")
+                    {
+                        const auto snapshot = sharedMemory_.read(binding.pointId);
+                        sharedMemory_.write(
+                            binding.pointId, snapshot.value, PointStatus::Bad);
+                    }
+                    else
+                    {
+                        sharedMemory_.write(
+                            binding.pointId,
+                            defaultValue(binding.dataType),
+                            PointStatus::Bad);
+                    }
                 }
                 catch (...)
                 {

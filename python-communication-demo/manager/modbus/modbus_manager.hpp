@@ -6,6 +6,7 @@
 #include <atomic>
 #include <memory>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace demo {
@@ -16,6 +17,7 @@ public:
 
     ModbusManager(
         const std::vector<ModbusDeviceConfig> &devices,
+        const std::vector<PointConfig> &points,
         SharedMemoryManager &sharedMemory
     );
 
@@ -62,6 +64,8 @@ private:
 
     SharedMemoryManager &
         sharedMemory_;
+
+    std::unordered_map<std::uint32_t, const PointConfig *> points_;
 
 
     std::atomic<bool>
