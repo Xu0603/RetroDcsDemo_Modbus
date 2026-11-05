@@ -48,14 +48,48 @@ void applyRetroStyle(QApplication &app)
 
 QIcon pixelIcon(const QColor &color, int kind)
 {
-    QPixmap pm(16, 16); pm.fill(Qt::transparent);
-    QPainter p(&pm); p.setRenderHint(QPainter::Antialiasing, false); p.setPen(Qt::black); p.setBrush(color);
-    if (kind == 0) { p.drawRect(1, 4, 13, 10); p.setBrush(color.lighter(135)); p.drawRect(2, 2, 6, 3); }
-    else if (kind == 1) { p.drawRect(2, 1, 11, 13); p.setBrush(Qt::white); p.drawRect(4, 3, 7, 4); p.setBrush(QColor("#808080")); p.drawRect(4, 9, 7, 4); }
-    else if (kind == 2) { p.drawEllipse(2, 2, 11, 11); p.setBrush(Qt::white); p.drawRect(6, 4, 3, 5); p.drawRect(7, 10, 1, 1); }
-    else if (kind == 3) { p.drawRect(1, 2, 13, 10); p.setPen(Qt::white); p.drawLine(3, 5, 12, 5); p.drawLine(3, 8, 9, 8); p.setPen(Qt::black); p.drawLine(4, 14, 11, 14); }
-    else { p.drawRect(2, 2, 11, 11); p.setBrush(Qt::white); p.drawRect(4, 4, 7, 7); p.setPen(color); p.drawLine(5, 7, 7, 9); p.drawLine(7, 9, 10, 5); }
-    p.setPen(Qt::white); p.drawPoint(2, 5); return QIcon(pm);
+    QPixmap pixmap(16, 16);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.setPen(Qt::black);
+    painter.setBrush(color);
+
+    if (kind == 0) {
+        painter.drawRect(1, 4, 13, 10);
+        painter.setBrush(color.lighter(135));
+        painter.drawRect(2, 2, 6, 3);
+    } else if (kind == 1) {
+        painter.drawRect(2, 1, 11, 13);
+        painter.setBrush(Qt::white);
+        painter.drawRect(4, 3, 7, 4);
+        painter.setBrush(QColor("#808080"));
+        painter.drawRect(4, 9, 7, 4);
+    } else if (kind == 2) {
+        painter.drawEllipse(2, 2, 11, 11);
+        painter.setBrush(Qt::white);
+        painter.drawRect(6, 4, 3, 5);
+        painter.drawRect(7, 10, 1, 1);
+    } else if (kind == 3) {
+        painter.drawRect(1, 2, 13, 10);
+        painter.setPen(Qt::white);
+        painter.drawLine(3, 5, 12, 5);
+        painter.drawLine(3, 8, 9, 8);
+        painter.setPen(Qt::black);
+        painter.drawLine(4, 14, 11, 14);
+    } else {
+        painter.drawRect(2, 2, 11, 11);
+        painter.setBrush(Qt::white);
+        painter.drawRect(4, 4, 7, 7);
+        painter.setPen(color);
+        painter.drawLine(5, 7, 7, 9);
+        painter.drawLine(7, 9, 10, 5);
+    }
+
+    painter.setPen(Qt::white);
+    painter.drawPoint(2, 5);
+    return QIcon(pixmap);
 }
 
 QLabel *sunkenLabel(const QString &text, int minWidth)
