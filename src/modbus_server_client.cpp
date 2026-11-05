@@ -80,7 +80,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "无法连接 ModbusServer %1:%2：%3"
+                    "无法连接 Modbus 采集服务 %1:%2：%3"
                 )
                 .arg(host_)
                 .arg(port_)
@@ -169,7 +169,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "发送 ModbusServer 请求失败"
+                    "发送 Modbus 采集服务请求失败"
                 );
         }
 
@@ -185,7 +185,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "发送 ModbusServer 请求超时：%1"
+                    "发送 Modbus 采集服务请求超时：%1"
                 )
                 .arg(socket.errorString());
         }
@@ -213,7 +213,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "ModbusServer 响应超时"
+                    "Modbus 采集服务响应超时"
                 );
         }
 
@@ -241,7 +241,7 @@ QJsonObject ModbusServerClient::request(
             {
                 *error =
                     QStringLiteral(
-                        "ModbusServer 响应头不完整"
+                        "Modbus 采集服务响应头不完整"
                     );
             }
 
@@ -269,7 +269,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "ModbusServer 响应 Magic 无效"
+                    "Modbus 采集服务响应 Magic 无效"
                 );
         }
 
@@ -327,7 +327,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "ModbusServer 协议版本不支持：%1"
+                    "Modbus 采集服务协议版本不支持：%1"
                 )
                 .arg(version);
         }
@@ -363,7 +363,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "ModbusServer 响应类型错误：收到 0x%1，期望 0x%2"
+                    "Modbus 采集服务响应类型错误：收到 0x%1，期望 0x%2"
                 )
                 .arg(
                     QString::number(
@@ -398,7 +398,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "ModbusServer Request ID 不匹配：收到 %1，期望 %2"
+                    "Modbus 采集服务 Request ID 不匹配：收到 %1，期望 %2"
                 )
                 .arg(responseId)
                 .arg(sentRequestId);
@@ -427,7 +427,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "ModbusServer Payload 过大：%1 字节"
+                    "Modbus 采集服务 Payload 过大：%1 字节"
                 )
                 .arg(payloadLength);
         }
@@ -462,7 +462,7 @@ QJsonObject ModbusServerClient::request(
             {
                 *error =
                     QStringLiteral(
-                        "ModbusServer Payload 接收超时"
+                        "Modbus 采集服务 Payload 接收超时"
                     );
             }
 
@@ -513,7 +513,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "ModbusServer JSON 解析失败：%1"
+                    "Modbus 采集服务 JSON 解析失败：%1"
                 )
                 .arg(
                     parseError.errorString()
@@ -534,7 +534,7 @@ QJsonObject ModbusServerClient::request(
         {
             *error =
                 QStringLiteral(
-                    "ModbusServer 返回的 JSON 不是 Object"
+                    "Modbus 采集服务返回的 JSON 不是 Object"
                 );
         }
 

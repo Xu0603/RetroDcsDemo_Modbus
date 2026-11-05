@@ -40,6 +40,10 @@ public:
             managerProcess_->terminate();
             if (!managerProcess_->waitForFinished(1500)) managerProcess_->kill();
         }
+        if (modbusCollectorProcess_ && modbusCollectorProcess_->state() != QProcess::NotRunning) {
+            modbusCollectorProcess_->terminate();
+            if (!modbusCollectorProcess_->waitForFinished(1500)) modbusCollectorProcess_->kill();
+        }
     }
 
     void openIntegrationPreview()
@@ -62,6 +66,9 @@ private:
     QTableWidget *frames_ = nullptr;
     QHash<QString, QString> lastModbusFrameKeys_;
     QPlainTextEdit *frameDetail_ = nullptr;
+    QComboBox *frameSourceFilter_ = nullptr;
+    QComboBox *frameDirectionFilter_ = nullptr;
+    QComboBox *frameFunctionFilter_ = nullptr;
     QPlainTextEdit *runtimeLog_ = nullptr;
     QTableWidget *problems_ = nullptr;
     QTabWidget *logTabs_ = nullptr;
@@ -101,8 +108,20 @@ private:
     QLineEdit *modbusTaskRetryEdit_ = nullptr;
     QLineEdit *modbusTaskReconnectEdit_ = nullptr;
 
-    QLineEdit *modbusTaskProtocolEdit_ = nullptr;
+    QComboBox *modbusTaskProtocolEdit_ = nullptr;
     QLineEdit *modbusTaskRoleEdit_ = nullptr;
+    QLineEdit *modbusTaskSerialPortEdit_ = nullptr;
+    QComboBox *modbusTaskBaudEdit_ = nullptr;
+    QComboBox *modbusTaskParityEdit_ = nullptr;
+    QComboBox *modbusTaskDataBitsEdit_ = nullptr;
+    QComboBox *modbusTaskStopBitsEdit_ = nullptr;
+    QLabel *modbusTaskHostLabel_ = nullptr;
+    QLabel *modbusTaskPortLabel_ = nullptr;
+    QLabel *modbusTaskSerialPortLabel_ = nullptr;
+    QLabel *modbusTaskBaudLabel_ = nullptr;
+    QLabel *modbusTaskParityLabel_ = nullptr;
+    QLabel *modbusTaskDataBitsLabel_ = nullptr;
+    QLabel *modbusTaskStopBitsLabel_ = nullptr;
 
     QPushButton *saveModbusTaskButton_ = nullptr;
 
@@ -112,6 +131,7 @@ private:
     QAction *startManagerAction_ = nullptr;
     QAction *stopManagerAction_ = nullptr;
         QProcess *managerProcess_ = nullptr;
+    QProcess *modbusCollectorProcess_ = nullptr;
     int onlineTabIndex_ = -1;
 
     // =========================================================
@@ -230,6 +250,7 @@ stopManagerAction_->setToolTip(
                 overview_ = nullptr; taskSummary_ = nullptr; pointSummary_ = nullptr;
             } else if (title == QStringLiteral("报文监视")) {
                 frames_ = nullptr; frameDetail_ = nullptr; rxRate_ = nullptr;
+                frameSourceFilter_ = nullptr; frameDirectionFilter_ = nullptr; frameFunctionFilter_ = nullptr;
             } else if (title == QStringLiteral("在线数据")) {
                 onlineTable_ = nullptr; onlineTabIndex_ = -1;
             }
@@ -1838,7 +1859,7 @@ void loadCurrentModbusTask()
                 "timeout, "
                 "retry_count, "
                 "reconnect_interval, "
-                "enable "
+                "enable, transport, serial_port, baud_rate, parity, data_bits, stop_bits "
                 "FROM modbus_tasks "
                 "WHERE id = ?"
             )
@@ -1936,12 +1957,19 @@ void loadCurrentModbusTask()
 
             if (modbusTaskProtocolEdit_)
             {
-                modbusTaskProtocolEdit_->setText(
-                    QStringLiteral(
-                        "Modbus TCP"
-                    )
-                );
+                const QString transport = query.value(9).toString().trimmed().toUpper();
+                modbusTaskProtocolEdit_->setCurrentText(
+                    transport == QStringLiteral("RTU") ? QStringLiteral("Modbus RTU") : QStringLiteral("Modbus TCP"));
             }
+
+            if (modbusTaskSerialPortEdit_) modbusTaskSerialPortEdit_->setText(query.value(10).toString());
+            if (modbusTaskBaudEdit_) modbusTaskBaudEdit_->setCurrentText(QString::number(query.value(11).toInt()));
+            if (modbusTaskParityEdit_) {
+                const QString parity = query.value(12).toString().toUpper();
+                modbusTaskParityEdit_->setCurrentIndex(parity == QStringLiteral("E") ? 1 : parity == QStringLiteral("O") ? 2 : 0);
+            }
+            if (modbusTaskDataBitsEdit_) modbusTaskDataBitsEdit_->setCurrentText(QString::number(query.value(13).toInt()));
+            if (modbusTaskStopBitsEdit_) modbusTaskStopBitsEdit_->setCurrentText(QString::number(query.value(14).toInt()));
 
 
             if (modbusTaskRoleEdit_)
@@ -2002,6 +2030,8 @@ void saveCurrentModbusTask()
         !modbusTaskRetryEdit_
         ||
         !modbusTaskReconnectEdit_
+        || !modbusTaskProtocolEdit_ || !modbusTaskSerialPortEdit_ || !modbusTaskBaudEdit_
+        || !modbusTaskParityEdit_ || !modbusTaskDataBitsEdit_ || !modbusTaskStopBitsEdit_
     )
     {
         return;
@@ -2017,6 +2047,16 @@ void saveCurrentModbusTask()
         modbusTaskHostEdit_
         ->text()
         .trimmed();
+
+    const bool isRtu = modbusTaskProtocolEdit_->currentText().contains(QStringLiteral("RTU"));
+    const QString transport = isRtu ? QStringLiteral("RTU") : QStringLiteral("TCP");
+    const QString serialPort = modbusTaskSerialPortEdit_->text().trimmed();
+    bool baudOk = false;
+    const int baudRate = modbusTaskBaudEdit_->currentText().trimmed().toInt(&baudOk);
+    const QString parity = QString(modbusTaskParityEdit_->currentText().isEmpty()
+                                   ? QChar('N') : modbusTaskParityEdit_->currentText().at(0));
+    const int dataBits = modbusTaskDataBitsEdit_->currentText().toInt();
+    const int stopBits = modbusTaskStopBitsEdit_->currentText().toInt();
 
 
     bool portOk = false;
@@ -2132,7 +2172,7 @@ void saveCurrentModbusTask()
     }
 
 
-    if (host.isEmpty())
+    if (!isRtu && host.isEmpty())
     {
         QMessageBox::warning(
             this,
@@ -2149,11 +2189,11 @@ void saveCurrentModbusTask()
 
 
     if (
-        !portOk
+        !isRtu && (!portOk
         ||
         port <= 0
         ||
-        port > 65535
+        port > 65535)
     )
     {
         QMessageBox::warning(
@@ -2166,6 +2206,13 @@ void saveCurrentModbusTask()
             )
         );
 
+        return;
+    }
+
+    if (isRtu && (serialPort.isEmpty() || !baudOk || baudRate <= 0))
+    {
+        QMessageBox::warning(this, QStringLiteral("保存 Modbus 任务"),
+                             QStringLiteral("RTU 串口设备不能为空，波特率必须大于 0。"));
         return;
     }
 
@@ -2319,6 +2366,7 @@ void saveCurrentModbusTask()
                     "timeout = ?, "
                     "retry_count = ?, "
                     "reconnect_interval = ? "
+                    ", transport = ?, serial_port = ?, baud_rate = ?, parity = ?, data_bits = ?, stop_bits = ? "
                     "WHERE id = ?"
                 )
             );
@@ -2334,6 +2382,12 @@ void saveCurrentModbusTask()
             query.addBindValue(
                 reconnectInterval
             );
+            query.addBindValue(transport);
+            query.addBindValue(serialPort);
+            query.addBindValue(baudRate);
+            query.addBindValue(parity);
+            query.addBindValue(dataBits);
+            query.addBindValue(stopBits);
             query.addBindValue(
                 currentModbusTaskId_
             );
@@ -3415,6 +3469,12 @@ if (
             "timeout INTEGER NOT NULL DEFAULT 1000, "
             "retry_count INTEGER NOT NULL DEFAULT 2, "
             "reconnect_interval INTEGER NOT NULL DEFAULT 3000, "
+            "transport TEXT NOT NULL DEFAULT 'TCP', "
+            "serial_port TEXT NOT NULL DEFAULT '/dev/ttyS0', "
+            "baud_rate INTEGER NOT NULL DEFAULT 9600, "
+            "parity TEXT NOT NULL DEFAULT 'N', "
+            "data_bits INTEGER NOT NULL DEFAULT 8, "
+            "stop_bits INTEGER NOT NULL DEFAULT 1, "
             "enable INTEGER NOT NULL DEFAULT 1"
             ")"
         )
@@ -3435,6 +3495,17 @@ if (
     db.close();
     return;
 }
+
+// 已存在的 TCP 数据库按列增量升级；重复 ALTER 的报错可安全忽略。
+const QStringList rtuMigrations = {
+    QStringLiteral("ALTER TABLE modbus_tasks ADD COLUMN transport TEXT NOT NULL DEFAULT 'TCP'"),
+    QStringLiteral("ALTER TABLE modbus_tasks ADD COLUMN serial_port TEXT NOT NULL DEFAULT '/dev/ttyS0'"),
+    QStringLiteral("ALTER TABLE modbus_tasks ADD COLUMN baud_rate INTEGER NOT NULL DEFAULT 9600"),
+    QStringLiteral("ALTER TABLE modbus_tasks ADD COLUMN parity TEXT NOT NULL DEFAULT 'N'"),
+    QStringLiteral("ALTER TABLE modbus_tasks ADD COLUMN data_bits INTEGER NOT NULL DEFAULT 8"),
+    QStringLiteral("ALTER TABLE modbus_tasks ADD COLUMN stop_bits INTEGER NOT NULL DEFAULT 1")
+};
+for (const QString &migration : rtuMigrations) query.exec(migration);
 
 
 // =====================================================
@@ -4679,6 +4750,21 @@ if (taskPeriod <= 0)
         auto *clear = new QPushButton(QStringLiteral("清空"));
         bar->addWidget(pause);
         bar->addWidget(clear);
+        bar->addSpacing(12);
+        bar->addWidget(new QLabel(QStringLiteral("来源：")));
+        frameSourceFilter_ = new QComboBox;
+        frameSourceFilter_->addItems({QStringLiteral("全部"), QStringLiteral("Modbus"), QStringLiteral("Python")});
+        bar->addWidget(frameSourceFilter_);
+        bar->addWidget(new QLabel(QStringLiteral("方向：")));
+        frameDirectionFilter_ = new QComboBox;
+        frameDirectionFilter_->addItems({QStringLiteral("全部"), QStringLiteral("TX"), QStringLiteral("RX")});
+        bar->addWidget(frameDirectionFilter_);
+        bar->addWidget(new QLabel(QStringLiteral("功能码：")));
+        frameFunctionFilter_ = new QComboBox;
+        frameFunctionFilter_->addItems({QStringLiteral("全部"), QStringLiteral("03 读保持寄存器"),
+                                        QStringLiteral("04 读输入寄存器"), QStringLiteral("06 写单寄存器"),
+                                        QStringLiteral("16 写多寄存器"), QStringLiteral("仅写操作（06/16）")});
+        bar->addWidget(frameFunctionFilter_);
         auto *source = new QLabel(
             QStringLiteral("监视来源：Python Runner / Modbus TCP")
         );
@@ -4690,19 +4776,28 @@ if (taskPeriod <= 0)
         layout->addLayout(bar);
 
         auto *split = new QSplitter(Qt::Vertical);
-        frames_ = new QTableWidget(0, 6);
+        frames_ = new QTableWidget(0, 7);
         frames_->setHorizontalHeaderLabels({
             QStringLiteral("时间"),
             QStringLiteral("来源"),
             QStringLiteral("任务 / 点名"),
-            QStringLiteral("报文 / 内容"),
+            QStringLiteral("功能"),
+            QStringLiteral("摘要"),
             QStringLiteral("长度"),
-            QStringLiteral("方向 / 结果")
+            QStringLiteral("方向")
         });
         frames_->setAlternatingRowColors(true);
         frames_->setSelectionBehavior(QAbstractItemView::SelectRows);
         frames_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        frames_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+        frames_->verticalHeader()->setVisible(false);
+        frames_->setShowGrid(false);
+        frames_->setWordWrap(false);
+        frames_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+        frames_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        frames_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        frames_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        frames_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+        frames_->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
         split->addWidget(frames_);
 
         auto *detailPanel = new QWidget;
@@ -4735,9 +4830,12 @@ if (taskPeriod <= 0)
         connect(frames_, &QTableWidget::itemSelectionChanged, frames_, [this] {
             if (!frameDetail_) return;
             const int row = frames_->currentRow();
-            QTableWidgetItem *summary = row >= 0 ? frames_->item(row, 3) : nullptr;
+            QTableWidgetItem *summary = row >= 0 ? frames_->item(row, 4) : nullptr;
             frameDetail_->setPlainText(summary ? summary->data(Qt::UserRole).toString() : QString());
         });
+        connect(frameSourceFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { applyFrameFilters(); });
+        connect(frameDirectionFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { applyFrameFilters(); });
+        connect(frameFunctionFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { applyFrameFilters(); });
         return page;
     }
 
@@ -4782,10 +4880,8 @@ if (taskPeriod <= 0)
         modbusTaskNameEdit_ =
             new QLineEdit;
 
-        modbusTaskProtocolEdit_ =
-            new QLineEdit(
-                QStringLiteral("Modbus TCP")
-            );
+        modbusTaskProtocolEdit_ = new QComboBox;
+        modbusTaskProtocolEdit_->addItems({QStringLiteral("Modbus TCP"), QStringLiteral("Modbus RTU")});
 
         modbusTaskRoleEdit_ =
             new QLineEdit(
@@ -4793,11 +4889,7 @@ if (taskPeriod <= 0)
             );
 
 
-        // 协议和角色目前不允许修改
-        modbusTaskProtocolEdit_->setReadOnly(
-            true
-        );
-
+        // 当前实现为主站；传输模式可以按任务选择。
         modbusTaskRoleEdit_->setReadOnly(
             true
         );
@@ -4852,21 +4944,56 @@ if (taskPeriod <= 0)
         modbusTaskSlaveEdit_ =
             new QLineEdit;
 
+        modbusTaskSerialPortEdit_ = new QLineEdit(QStringLiteral("/dev/ttyS0"));
+        modbusTaskBaudEdit_ = new QComboBox;
+        modbusTaskBaudEdit_->setEditable(true);
+        modbusTaskBaudEdit_->addItems({QStringLiteral("1200"), QStringLiteral("2400"), QStringLiteral("4800"),
+                                       QStringLiteral("9600"), QStringLiteral("19200"), QStringLiteral("38400"),
+                                       QStringLiteral("57600"), QStringLiteral("115200")});
+        modbusTaskBaudEdit_->setCurrentText(QStringLiteral("9600"));
+        modbusTaskParityEdit_ = new QComboBox;
+        modbusTaskParityEdit_->addItems({QStringLiteral("N（无校验）"), QStringLiteral("E（偶校验）"), QStringLiteral("O（奇校验）")});
+        modbusTaskDataBitsEdit_ = new QComboBox;
+        modbusTaskDataBitsEdit_->addItems({QStringLiteral("8"), QStringLiteral("7")});
+        modbusTaskStopBitsEdit_ = new QComboBox;
+        modbusTaskStopBitsEdit_->addItems({QStringLiteral("1"), QStringLiteral("2")});
 
-        endpointForm->addRow(
-            QStringLiteral("IP 地址"),
-            modbusTaskHostEdit_
-        );
+        modbusTaskHostLabel_ = new QLabel(QStringLiteral("IP 地址"));
+        modbusTaskPortLabel_ = new QLabel(QStringLiteral("端口"));
+        modbusTaskSerialPortLabel_ = new QLabel(QStringLiteral("串口设备"));
+        modbusTaskBaudLabel_ = new QLabel(QStringLiteral("波特率"));
+        modbusTaskParityLabel_ = new QLabel(QStringLiteral("校验位"));
+        modbusTaskDataBitsLabel_ = new QLabel(QStringLiteral("数据位"));
+        modbusTaskStopBitsLabel_ = new QLabel(QStringLiteral("停止位"));
 
-        endpointForm->addRow(
-            QStringLiteral("端口"),
-            modbusTaskPortEdit_
-        );
+        endpointForm->addRow(modbusTaskHostLabel_, modbusTaskHostEdit_);
+        endpointForm->addRow(modbusTaskPortLabel_, modbusTaskPortEdit_);
+        endpointForm->addRow(modbusTaskSerialPortLabel_, modbusTaskSerialPortEdit_);
+        endpointForm->addRow(modbusTaskBaudLabel_, modbusTaskBaudEdit_);
+        endpointForm->addRow(modbusTaskParityLabel_, modbusTaskParityEdit_);
+        endpointForm->addRow(modbusTaskDataBitsLabel_, modbusTaskDataBitsEdit_);
+        endpointForm->addRow(modbusTaskStopBitsLabel_, modbusTaskStopBitsEdit_);
 
         endpointForm->addRow(
             QStringLiteral("Unit ID"),
             modbusTaskSlaveEdit_
         );
+
+        auto updateTransportFields = [this] {
+            const bool rtu = modbusTaskProtocolEdit_ && modbusTaskProtocolEdit_->currentText().contains(QStringLiteral("RTU"));
+            for (QWidget *widget : QList<QWidget *>{modbusTaskHostLabel_, modbusTaskHostEdit_,
+                                                   modbusTaskPortLabel_, modbusTaskPortEdit_})
+                if (widget) widget->setVisible(!rtu);
+            for (QWidget *widget : QList<QWidget *>{modbusTaskSerialPortLabel_, modbusTaskSerialPortEdit_,
+                                                   modbusTaskBaudLabel_, modbusTaskBaudEdit_,
+                                                   modbusTaskParityLabel_, modbusTaskParityEdit_,
+                                                   modbusTaskDataBitsLabel_, modbusTaskDataBitsEdit_,
+                                                   modbusTaskStopBitsLabel_, modbusTaskStopBitsEdit_})
+                if (widget) widget->setVisible(rtu);
+        };
+        connect(modbusTaskProtocolEdit_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [updateTransportFields](int) { updateTransportFields(); });
+        updateTransportFields();
 
 
         layout->addWidget(
@@ -6035,37 +6162,58 @@ if (modbusTasksItem_)
 
 void startModbusDetection()
 {
-    // =====================================================
-    // 1. 测试 ModbusServer TCP 连接
-    // =====================================================
-
     QString error;
-
-    const QJsonObject ping =
+    QJsonObject ping =
         modbusServerClient_.request(
             1,
             modbusRequestId_,
             &error
         );
 
-
     if (ping.isEmpty())
     {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("未检测到 Modbus 数据服务"),
-            QStringLiteral(
-                "无法连接 ModbusCollector 的 ModbusServer。\n\n"
-                "地址：127.0.0.1:19091\n\n"
-                "错误信息：%1\n\n"
-                "请确认：\n"
-                "1. ModbusCollector 已经启动\n"
-                "2. ModbusCollector 正在采集数据\n"
-                "3. ModbusServer 已经监听 19091 端口"
-            ).arg(error)
-        );
+        const QString collectorDir = QStringLiteral("/home/xu/桌面/ModbusCollector");
+        const QString executable = QDir(collectorDir).filePath(QStringLiteral("build/ModbusCollector"));
+        if (!QFileInfo(executable).isExecutable()) {
+            QMessageBox::warning(this, QStringLiteral("无法启动 Modbus 采集服务"),
+                QStringLiteral("没有找到可执行的 ModbusCollector：\n%1\n\n请先编译 Collector。")
+                    .arg(executable));
+            return;
+        }
 
-        return;
+        if (modbusCollectorProcess_) modbusCollectorProcess_->deleteLater();
+        modbusCollectorProcess_ = new QProcess(this);
+        modbusCollectorProcess_->setWorkingDirectory(collectorDir);
+        modbusCollectorProcess_->setProcessChannelMode(QProcess::ForwardedChannels);
+        connect(modbusCollectorProcess_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this](int code) {
+                    if (serviceStatus_) {
+                        serviceStatus_->setText(QStringLiteral("○ Modbus 采集服务已退出"));
+                        serviceStatus_->setStyleSheet(QStringLiteral("color:#c00000;font-weight:bold;"));
+                    }
+                    statusBar()->showMessage(QStringLiteral("ModbusCollector 已退出，代码 %1").arg(code), 5000);
+                });
+        modbusCollectorProcess_->start(executable, QStringList());
+        if (!modbusCollectorProcess_->waitForStarted(2000)) {
+            QMessageBox::warning(this, QStringLiteral("无法启动 Modbus 采集服务"),
+                                 modbusCollectorProcess_->errorString());
+            return;
+        }
+
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 3000 && ping.isEmpty()) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(100);
+            error.clear();
+            ping = modbusServerClient_.request(1, modbusRequestId_, &error);
+        }
+        if (ping.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Modbus 采集服务启动失败"),
+                QStringLiteral("ModbusCollector 已启动，但本机采集接口尚未就绪。\n\n错误信息：%1")
+                    .arg(error));
+            return;
+        }
     }
 
 
@@ -6163,14 +6311,14 @@ void startModbusDetection()
 
 
     // =====================================================
-    // 3. 立即读取一次 ModbusServer 数据
+    // 3. 立即读取一次采集服务数据
     // =====================================================
 
     pollModbusServer();
 
 
     // =====================================================
-    // 4. 启动 TCP 数据定时刷新
+    // 4. 启动本机数据定时刷新
     // =====================================================
 
     if (!modbusTimer_)
@@ -6214,7 +6362,7 @@ void startModbusDetection()
 
     statusBar()->showMessage(
         QStringLiteral(
-            "Modbus 检测已启动，正在通过 TCP 读取 ModbusServer"
+            "Modbus 检测已启动（设备通道按任务使用 TCP 或 RTU）"
         ),
         3000
     );
@@ -6852,6 +7000,14 @@ if (overview_)
             );
         }
 
+        if (modbusCollectorProcess_ &&
+            modbusCollectorProcess_->state() != QProcess::NotRunning)
+        {
+            modbusCollectorProcess_->terminate();
+            if (!modbusCollectorProcess_->waitForFinished(2000))
+                modbusCollectorProcess_->kill();
+        }
+
 
         return;
     }
@@ -7429,7 +7585,7 @@ QWidget *createOnlineDataPage()
 
     auto *hint = new QLabel(
     QStringLiteral(
-        " 数据通道：ModbusCollector ModbusServer TCP 127.0.0.1:19091"
+        " 数据来源：ModbusCollector 本机采集服务（设备侧支持 TCP / RTU）"
         "    |    界面刷新周期：500 ms"
         "    |    各 Modbus 任务按各自配置的采集周期独立采集"
     )
@@ -8101,6 +8257,23 @@ void releaseOnlineValue(int row)
             ),
             4000
         );
+
+        // OUTPUT 的 FC06/FC16 使用独立写连接，不属于周期采集快照。
+        // 直接显示服务端返回的真实写请求和写响应，避免被下一轮 FC03 覆盖。
+        if (isOutput && frames_ && !framePaused_)
+        {
+            const QString timestamp = response.value(QStringLiteral("timestamp")).toString();
+            const QString tx = response.value(QStringLiteral("txTelegram")).toString();
+            const QString rx = response.value(QStringLiteral("rxTelegram")).toString();
+            const QString transport = response.value(QStringLiteral("transport")).toString(QStringLiteral("TCP"));
+            appendModbusFrame(timestamp, name, QStringLiteral("RX"), rx, transport);
+            appendModbusFrame(timestamp, name, QStringLiteral("TX"), tx, transport);
+            const QString monitorKey = QStringLiteral("%1:%2").arg(taskId).arg(pointId);
+            lastModbusFrameKeys_.insert(
+                monitorKey,
+                timestamp + QStringLiteral("|") + tx + QStringLiteral("|") + rx
+            );
+        }
 
 
         // 强制完成后立即重新读取
@@ -8906,6 +9079,29 @@ void showModbusPoints()
         }
     }
 
+    void applyFrameFilters()
+    {
+        if (!frames_) return;
+        const QString source = frameSourceFilter_ ? frameSourceFilter_->currentText() : QStringLiteral("全部");
+        const QString direction = frameDirectionFilter_ ? frameDirectionFilter_->currentText() : QStringLiteral("全部");
+        const int functionIndex = frameFunctionFilter_ ? frameFunctionFilter_->currentIndex() : 0;
+        const QStringList functions = {QString(), QStringLiteral("03"), QStringLiteral("04"),
+                                       QStringLiteral("06"), QStringLiteral("16")};
+        for (int row = 0; row < frames_->rowCount(); ++row) {
+            const QString rowSource = frames_->item(row, 1) ? frames_->item(row, 1)->data(Qt::UserRole).toString() : QString();
+            const QString rowFunction = frames_->item(row, 3) ? frames_->item(row, 3)->data(Qt::UserRole).toString() : QString();
+            const QString rowDirection = frames_->item(row, 6) ? frames_->item(row, 6)->text() : QString();
+            const bool sourceOk = source == QStringLiteral("全部") ||
+                (source == QStringLiteral("Modbus") && rowSource == QStringLiteral("MODBUS")) ||
+                (source == QStringLiteral("Python") && rowSource == QStringLiteral("PY"));
+            const bool directionOk = direction == QStringLiteral("全部") || rowDirection == direction;
+            bool functionOk = functionIndex == 0;
+            if (functionIndex >= 1 && functionIndex <= 4) functionOk = rowFunction == functions.at(functionIndex);
+            else if (functionIndex == 5) functionOk = rowFunction == QStringLiteral("06") || rowFunction == QStringLiteral("16");
+            frames_->setRowHidden(row, !(sourceOk && directionOk && functionOk));
+        }
+    }
+
     void appendPythonOutput(const QString &taskName, const QJsonObject &entry)
     {
         const QString text = entry.value(QStringLiteral("text")).toString();
@@ -8919,17 +9115,20 @@ void showModbusPoints()
         frames_->insertRow(0);
         const QStringList values = {
             timestamp.toString(QStringLiteral("HH:mm:ss.zzz")), QStringLiteral("PY"), taskName,
-            summary, QString::number(text.toUtf8().size()), stream
+            QStringLiteral("—"), summary, QString::number(text.toUtf8().size()), stream
         };
         for (int column = 0; column < values.size(); ++column)
             frames_->setItem(0, column, new QTableWidgetItem(values[column]));
-        frames_->item(0, 3)->setData(Qt::UserRole, text);
-        frames_->item(0, 3)->setToolTip(QStringLiteral("单击查看完整内容"));
+        frames_->item(0, 1)->setData(Qt::UserRole, QStringLiteral("PY"));
+        frames_->item(0, 3)->setData(Qt::UserRole, QString());
+        frames_->item(0, 4)->setData(Qt::UserRole, text);
+        frames_->item(0, 4)->setToolTip(QStringLiteral("单击查看完整内容"));
         frames_->item(0, 1)->setForeground(QColor("#800080"));
         if (stream == QStringLiteral("stderr")) {
-            frames_->item(0, 3)->setForeground(QColor("#c00000"));
-            frames_->item(0, 5)->setForeground(QColor("#c00000"));
+            frames_->item(0, 4)->setForeground(QColor("#c00000"));
+            frames_->item(0, 6)->setForeground(QColor("#c00000"));
         }
+        applyFrameFilters();
         while (frames_->rowCount() > 500) frames_->removeRow(frames_->rowCount() - 1);
     }
 
@@ -8937,7 +9136,8 @@ void appendModbusFrame(
     const QString &timestamp,
     const QString &pointName,
     const QString &direction,
-    const QString &telegram
+    const QString &telegram,
+    const QString &transport
 )
 {
     if (!frames_ || framePaused_)
@@ -8982,6 +9182,60 @@ void appendModbusFrame(
     const int byteLength =
         bytes.size();
 
+    const bool isRtu = transport.compare(QStringLiteral("RTU"), Qt::CaseInsensitive) == 0;
+    const int unitIndex = isRtu ? 0 : 6;
+    const int functionIndex = isRtu ? 1 : 7;
+    const int payloadIndex = isRtu ? 2 : 8;
+    // TCP 含 7 字节 MBAP；RTU 从站地址和功能码从第 1、2 字节开始。
+    bool functionOk = false;
+    int functionValue = bytes.size() > functionIndex ? bytes.at(functionIndex).toInt(&functionOk, 16) : -1;
+    const bool exceptionResponse = functionOk && (functionValue & 0x80);
+    if (exceptionResponse) functionValue &= 0x7f;
+    const QString functionCode = functionOk
+        ? QStringLiteral("%1").arg(functionValue == 0x10 ? 16 : functionValue, 2, 10, QChar('0'))
+        : QStringLiteral("—");
+    QString functionName;
+    switch (functionValue) {
+    case 0x03: functionName = QStringLiteral("读保持寄存器"); break;
+    case 0x04: functionName = QStringLiteral("读输入寄存器"); break;
+    case 0x06: functionName = QStringLiteral("写单寄存器"); break;
+    case 0x10: functionName = QStringLiteral("写多寄存器"); break;
+    default: functionName = QStringLiteral("未知功能"); break;
+    }
+    if (exceptionResponse) functionName += QStringLiteral("（异常响应）");
+
+    auto hexWord = [&bytes](int index, bool *ok = nullptr) {
+        bool highOk = false, lowOk = false;
+        const int high = bytes.size() > index ? bytes.at(index).toInt(&highOk, 16) : 0;
+        const int low = bytes.size() > index + 1 ? bytes.at(index + 1).toInt(&lowOk, 16) : 0;
+        if (ok) *ok = highOk && lowOk;
+        return (high << 8) | low;
+    };
+    bool unitOk = false;
+    const int unitId = bytes.size() > unitIndex ? bytes.at(unitIndex).toInt(&unitOk, 16) : 0;
+    bool addressOk = false;
+    const int address = hexWord(payloadIndex, &addressOk);
+    bool fieldOk = false;
+    const int field = hexWord(payloadIndex + 2, &fieldOk);
+    const int registerNumber = address + (functionValue == 0x04 ? 30001 : 40001);
+
+    QString summary = QStringLiteral("Unit %1  ·  FC%2 %3").arg(unitOk ? QString::number(unitId) : QStringLiteral("?"), functionCode, functionName);
+    if (direction == QStringLiteral("TX") && addressOk && fieldOk) {
+        summary += QStringLiteral("  ·  地址 %1").arg(registerNumber);
+        if (functionValue == 0x03 || functionValue == 0x04 || functionValue == 0x10)
+            summary += QStringLiteral("  ·  数量 %1").arg(field);
+        else if (functionValue == 0x06)
+            summary += QStringLiteral("  ·  值 %1").arg(field);
+    }
+
+    QString detail = QStringLiteral("MODBUS %1 %2\n点名：%3\nUnit ID：%4\n功能码：FC%5 %6\n长度：%7 字节")
+        .arg(isRtu ? QStringLiteral("RTU") : QStringLiteral("TCP"), direction, pointName,
+             unitOk ? QString::number(unitId) : QStringLiteral("未知"),
+             functionCode, functionName, QString::number(byteLength));
+    if (addressOk && (direction == QStringLiteral("TX") || functionValue == 0x06 || functionValue == 0x10))
+        detail += QStringLiteral("\n寄存器：%1（协议地址 %2）").arg(registerNumber).arg(address);
+    detail += QStringLiteral("\n\n原始报文：\n%1").arg(telegram);
+
     // ---------------------------------------------------------
     // 插入最上面
     // ---------------------------------------------------------
@@ -8990,9 +9244,10 @@ void appendModbusFrame(
 
     const QStringList values = {
         displayTime,
-        QStringLiteral("MODBUS"),
+        isRtu ? QStringLiteral("RTU") : QStringLiteral("TCP"),
         pointName,
-        telegram,
+        QStringLiteral("FC%1 %2").arg(functionCode, functionName),
+        summary,
         QString::number(byteLength),
         direction
     };
@@ -9013,13 +9268,16 @@ void appendModbusFrame(
     }
 
     // 完整报文放进 UserRole，供下面详情框查看
-    frames_->item(0, 3)->setData(
+    frames_->item(0, 1)->setData(Qt::UserRole, QStringLiteral("MODBUS"));
+    frames_->item(0, 3)->setData(Qt::UserRole, functionCode);
+    frames_->item(0, 4)->setData(
         Qt::UserRole,
-        telegram
+        detail
     );
 
-    frames_->item(0, 3)->setToolTip(
-        QStringLiteral("单击查看完整 Modbus TCP 报文")
+    frames_->item(0, 4)->setToolTip(
+        isRtu ? QStringLiteral("单击查看完整 Modbus RTU 报文（含 CRC）")
+              : QStringLiteral("单击查看完整 Modbus TCP 报文")
     );
 
     // ---------------------------------------------------------
@@ -9034,9 +9292,11 @@ void appendModbusFrame(
             QColor("#0000c0")
         );
 
-        frames_->item(0, 5)->setForeground(
+        frames_->item(0, 6)->setForeground(
             QColor("#0000c0")
         );
+        if (functionValue == 0x06 || functionValue == 0x10)
+            frames_->item(0, 3)->setBackground(QColor("#fff0c0"));
     }
     else if (direction == QStringLiteral("RX"))
     {
@@ -9044,10 +9304,17 @@ void appendModbusFrame(
             QColor("#008000")
         );
 
-        frames_->item(0, 5)->setForeground(
+        frames_->item(0, 6)->setForeground(
             QColor("#008000")
         );
     }
+
+    if (exceptionResponse) {
+        for (int column = 0; column < frames_->columnCount(); ++column)
+            frames_->item(0, column)->setForeground(QColor("#c00000"));
+    }
+
+    applyFrameFilters();
 
     // 最多保留 500 条
     while (frames_->rowCount() > 500)
@@ -9282,7 +9549,7 @@ if (response.isEmpty())
                     6
                 )->setText(
                     QStringLiteral(
-                        "ModbusServer 未连接"
+                        "Modbus 采集服务未连接"
                     )
                 );
 
@@ -9306,7 +9573,7 @@ if (response.isEmpty())
 
     statusBar()->showMessage(
         QStringLiteral(
-            "ModbusServer 未连接：%1"
+            "Modbus 采集服务未连接：%1"
         ).arg(error)
     );
 
@@ -9327,7 +9594,7 @@ if (response.isEmpty())
     {
         statusBar()->showMessage(
             QStringLiteral(
-                "ModbusServer 返回错误：%1"
+                "Modbus 采集服务返回错误：%1"
             )
             .arg(
                 response.value(
@@ -9456,11 +9723,29 @@ if (
     // 协议 / 角色
     // -----------------------------------------------------
 
+    bool hasTcpTask = false;
+    bool hasRtuTask = false;
+    QStringList endpoints;
+    for (const QJsonValue &taskValue : tasks) {
+        const QJsonObject task = taskValue.toObject();
+        const QString transport = task.value(QStringLiteral("transport")).toString(QStringLiteral("TCP"));
+        if (transport == QStringLiteral("RTU")) {
+            hasRtuTask = true;
+            endpoints << QStringLiteral("%1@%2").arg(task.value(QStringLiteral("serialPort")).toString())
+                                              .arg(task.value(QStringLiteral("baudRate")).toInt());
+        } else {
+            hasTcpTask = true;
+            endpoints << QStringLiteral("%1:%2").arg(task.value(QStringLiteral("host")).toString())
+                                               .arg(task.value(QStringLiteral("port")).toInt());
+        }
+    }
+    const QString protocolSummary = hasTcpTask && hasRtuTask ? QStringLiteral("Modbus TCP + RTU / 主站")
+        : hasRtuTask ? QStringLiteral("Modbus RTU / 主站") : QStringLiteral("Modbus TCP / 主站");
     overview_->item(
         modbusRow,
         2
     )->setText(
-        QStringLiteral("Modbus TCP / 主站")
+        protocolSummary
     );
 
 
@@ -9476,7 +9761,7 @@ if (
         modbusRow,
         3
     )->setText(
-        QStringLiteral("127.0.0.1:502")
+        endpoints.isEmpty() ? QStringLiteral("--") : endpoints.join(QStringLiteral("; "))
     );
 
 
@@ -9675,6 +9960,10 @@ for (
             QStringLiteral("port")
         ).toInt();
 
+    const QString taskTransport = task.value(QStringLiteral("transport")).toString(QStringLiteral("TCP"));
+    const QString taskSerialPort = task.value(QStringLiteral("serialPort")).toString();
+    const int taskBaudRate = task.value(QStringLiteral("baudRate")).toInt();
+
     const int taskSlaveId =
         task.value(
             QStringLiteral("slaveId")
@@ -9713,16 +10002,11 @@ for (
     );
 
 
-    const QString headerText =
-        QStringLiteral(
-            "▼ %1    |    %2:%3    |    Slave %4"
-            "    |    采集周期 %5 ms"
-        )
-        .arg(taskName)
-        .arg(taskHost)
-        .arg(taskPort)
-        .arg(taskSlaveId)
-        .arg(taskPeriod);
+    const QString endpoint = taskTransport == QStringLiteral("RTU")
+        ? QStringLiteral("RTU %1 @ %2").arg(taskSerialPort).arg(taskBaudRate)
+        : QStringLiteral("TCP %1:%2").arg(taskHost).arg(taskPort);
+    const QString headerText = QStringLiteral("▼ %1    |    %2    |    Slave %3    |    采集周期 %4 ms")
+        .arg(taskName, endpoint).arg(taskSlaveId).arg(taskPeriod);
 
 
     auto *headerItem =
@@ -9919,14 +10203,16 @@ for (
                     timestamp,
                     pointName,
                     QStringLiteral("RX"),
-                    rxTelegram
+                    rxTelegram,
+                    taskTransport
                 );
 
                 appendModbusFrame(
                     timestamp,
                     pointName,
                     QStringLiteral("TX"),
-                    txTelegram
+                    txTelegram,
+                    taskTransport
                 );
             }
         }
@@ -10390,7 +10676,7 @@ for (
 
     statusBar()->showMessage(
         QStringLiteral(
-            "ModbusServer TCP：已读取 %1 个变量"
+            "Modbus 采集服务：已读取 %1 个变量"
         )
         .arg(
             variables.size()
